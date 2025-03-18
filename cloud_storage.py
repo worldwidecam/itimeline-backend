@@ -41,12 +41,25 @@ def upload_file(file, folder="timeline_forum", **options):
                 'quality': 'auto',  # Auto-select optimal quality
                 'fetch_format': 'auto',  # Auto-select optimal format
             })
+        
+        # For audio files, add specific optimizations
+        elif hasattr(file, 'content_type') and file.content_type.startswith('audio/'):
+            default_options.update({
+                'resource_type': 'raw',  # Use raw for audio files to prevent transcoding issues
+            })
             
         # Merge default options with provided options
         upload_options = {**default_options, **options}
         
+        # Print debug info
+        print(f"Uploading file to Cloudinary: {file.filename}")
+        print(f"Content type: {file.content_type if hasattr(file, 'content_type') else 'unknown'}")
+        print(f"Upload options: {upload_options}")
+        
         # Upload the file to Cloudinary
         result = cloudinary.uploader.upload(file, **upload_options)
+        
+        print(f"Upload successful: {result['secure_url']}")
         
         return {
             'success': True,
@@ -55,6 +68,7 @@ def upload_file(file, folder="timeline_forum", **options):
             'resource_type': result['resource_type']
         }
     except Exception as e:
+        print(f"Upload error: {str(e)}")
         return {
             'success': False,
             'error': str(e)

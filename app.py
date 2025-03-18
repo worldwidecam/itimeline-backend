@@ -791,10 +791,14 @@ def update_music_preferences():
             return jsonify({'error': 'User not found'}), 404
 
         if 'music' not in request.files:
+            app.logger.error('No music file provided in request')
             return jsonify({'error': 'No music file provided'}), 400
             
         file = request.files['music']
+        app.logger.info(f'Received file: {file.filename}, Content-Type: {file.content_type}, Size: {file.content_length}')
+        
         if file.filename == '':
+            app.logger.error('Empty filename provided')
             return jsonify({'error': 'No selected file'}), 400
             
         if file and allowed_audio_file(file.filename):
@@ -807,21 +811,24 @@ def update_music_preferences():
             # For audio files, we can specify format and quality
             upload_options = {
                 'resource_type': 'auto',
-                'audio_codec': 'aac',  # Use AAC codec for better compression
-                'bit_rate': '128k'     # Set bitrate for audio quality
+                'use_filename': True,
+                'unique_filename': True
             }
             
             upload_result = cloudinary_upload_file(file, folder="timeline_forum/music", **upload_options)
             
             if not upload_result['success']:
                 app.logger.error(f"Cloudinary upload failed: {upload_result['error']}")
-                return jsonify({'error': 'File upload failed'}), 500
+                return jsonify({'error': f"File upload failed: {upload_result['error']}"}), 500
             
             # Update or create music preferences
             music_prefs = user.music
             if not music_prefs:
+                app.logger.info(f"Creating new music preferences for user {current_user_id}")
                 music_prefs = UserMusic(user_id=user.id)
                 db.session.add(music_prefs)
+            else:
+                app.logger.info(f"Updating existing music preferences for user {current_user_id}")
             
             # Store the Cloudinary URL and metadata
             music_prefs.music_url = upload_result['url']
@@ -829,7 +836,7 @@ def update_music_preferences():
             music_prefs.music_public_id = upload_result['public_id']
             
             db.session.commit()
-            app.logger.info('Music preferences updated successfully')
+            app.logger.info(f'Music preferences updated successfully: {upload_result["url"]}')
             
             return jsonify({
                 'success': True,
@@ -837,7 +844,8 @@ def update_music_preferences():
                 'message': 'Music preferences updated successfully'
             })
         else:
-            return jsonify({'error': 'Invalid audio file format'}), 400
+            app.logger.error(f'Invalid audio file format: {file.filename}')
+            return jsonify({'error': f'Invalid audio file format. Allowed formats are: {", ".join(ALLOWED_AUDIO_EXTENSIONS)}'}), 400
             
     except Exception as e:
         db.session.rollback()
