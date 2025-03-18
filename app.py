@@ -1136,11 +1136,12 @@ def update_profile():
         if 'avatar' in request.files:
             file = request.files['avatar']
             if file and allowed_file(file.filename):
-                ext = file.filename.rsplit('.', 1)[1].lower()
-                filename = f'avatar_{current_user_id}_{int(time.time())}.{ext}'
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(file_path)
-                user.avatar_url = f'/uploads/{filename}'
+                # Use Cloudinary instead of local storage
+                result = cloudinary_upload_file(file, folder="profile_avatars")
+                if result['success']:
+                    user.avatar_url = result['url']
+                else:
+                    return jsonify({'error': f'Failed to upload avatar: {result["error"]}'}), 500
 
         # Update other fields
         form_data = request.form
@@ -1170,6 +1171,7 @@ def update_profile():
 
     except Exception as e:
         db.session.rollback()
+        logger.error(f"Error updating profile: {str(e)}")
         return jsonify({'error': 'Failed to update profile'}), 500
 
 @app.route('/api/timeline-v3', methods=['GET'])
