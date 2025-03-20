@@ -10,6 +10,15 @@ Backend server for the iTimeline application, a modern web application for creat
 - Database management with SQLAlchemy
 - CORS support for cross-domain requests
 
+### Date and Time Handling
+- **Raw Event Date Storage**: Stores event dates in the `raw_event_date` column as strings in the format `MM.DD.YYYY.HH.MM.AMPM`
+- **Exact User Time Flag**: Uses the `is_exact_user_time` boolean flag to prioritize user-selected times over server times
+- **Timezone-Independent Processing**: Ensures accurate representation of event times regardless of server timezone
+- **Dual Timestamp System**:
+  - **Event Date**: The user-selected date and time for the event (stored in both ISO format and raw string format)
+  - **Published Date**: The server timestamp when the event was created (automatically generated)
+- **Backward Compatibility**: Maintains support for events created before the raw date string implementation
+
 ## Technical Stack
 
 - **Framework**: Flask (Python)
