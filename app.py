@@ -316,6 +316,7 @@ class Event(db.Model):
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text, nullable=True, default='')
     event_date = db.Column(db.DateTime, nullable=False)
+    raw_event_date = db.Column(db.String(100), nullable=True, default='')  # Make it optional with default
     type = db.Column(db.String(50), nullable=False, default='remark')
     url = db.Column(db.String(500), nullable=True)
     url_title = db.Column(db.String(500), nullable=True)
@@ -327,6 +328,7 @@ class Event(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    is_exact_user_time = db.Column(db.Boolean, default=False)  # Flag for preserving exact user input time
     tags = db.relationship('Tag', secondary=event_tags, backref=db.backref('events', lazy='dynamic'))
     referenced_in = db.relationship('Timeline', secondary=event_timeline_refs, backref=db.backref('referenced_events', lazy='dynamic'))
 
@@ -1316,6 +1318,8 @@ def get_timeline_v3_events(timeline_id):
                 if original_timeline:
                     # Check if the original timeline's tag is already in the list
                     original_tag_name = original_timeline.name.lower()
+                    
+                    # Check for both normal and hashtag-prefixed versions (for backward compatibility)
                     tag_exists = False
                     for tag in tags:
                         if tag['name'].lower() == original_tag_name:
@@ -1332,7 +1336,8 @@ def get_timeline_v3_events(timeline_id):
                                 timeline_id=original_timeline.id
                             )
                             db.session.add(original_tag)
-                            db.session.flush()
+                            db.session.flush()  # Get the timeline ID
+                        tag.timeline_id = original_tag.id
                         
                         # Add the tag to the event's tags list
                         tags.append({
@@ -1357,6 +1362,7 @@ def get_timeline_v3_events(timeline_id):
                 'timeline_id': event.timeline_id,
                 'created_by': event.created_by,
                 'created_at': event.created_at.isoformat(),
+                'is_exact_user_time': event.is_exact_user_time,  # Include the flag
                 'tags': tags
             }
             events_json.append(event_json)
@@ -1375,47 +1381,153 @@ def create_timeline_v3_event(timeline_id):
         app.logger.info(f'Creating event with data: {data}')
         
         # Validate required fields
-        if not all(key in data for key in ['title', 'event_date', 'type']):
-            return jsonify({'error': 'Missing required fields'}), 400
-            
-        # Parse the event date from ISO format
-        try:
-            # Accept the date string exactly as provided by the frontend
-            # This preserves the user's input without any timezone adjustments
-            event_date_str = data['event_date'].replace('Z', '+00:00')
-            event_date = datetime.fromisoformat(event_date_str)
-            
-            app.logger.info(f'Original event_date: {event_date}')
-            
-            # Log timezone information if provided (for debugging only)
-            if 'timezone_offset' in data:
-                app.logger.info(f'Timezone offset (minutes): {data["timezone_offset"]}')
-                app.logger.info(f'Timezone name: {data.get("timezone_name", "Unknown")}')
-            
-            # Use created_at as provided or current time
-            if 'created_at' in data:
-                created_at_str = data['created_at'].replace('Z', '+00:00')
-                created_at = datetime.fromisoformat(created_at_str)
-                app.logger.info(f'Original created_at: {created_at}')
-            else:
-                created_at = datetime.now()
+        if not all(key in data for key in ['title', 'type']):
+            return jsonify({'error': 'Missing required fields (title, type)'}), 400
+        
+        # Get the raw date string (new approach)
+        raw_event_date = data.get('raw_event_date', '')
+        app.logger.info(f'Raw event date string: {raw_event_date}')
+        
+        # Check for the combined datetime field (backward compatibility)
+        event_datetime_str = data.get('event_datetime')
+        is_exact_user_time = data.get('is_exact_user_time', False)
+        
+        # Convert is_exact_user_time to boolean if it's not already
+        if not isinstance(is_exact_user_time, bool):
+            if isinstance(is_exact_user_time, str):
+                is_exact_user_time = is_exact_user_time.lower() in ('true', 't', 'yes', 'y', '1')
+            elif isinstance(is_exact_user_time, int):
+                is_exact_user_time = is_exact_user_time > 0
+        
+        app.logger.info(f'is_exact_user_time parsed as: {is_exact_user_time}')
+        
+        # Default to current time
+        event_datetime = datetime.now()
+        
+        # If we have a raw date string, parse it
+        if raw_event_date and is_exact_user_time:
+            try:
+                # Parse the raw date string format: MM.DD.YYYY.HH.MM.AMPM
+                parts = raw_event_date.split('.')
+                if len(parts) >= 6:
+                    month = int(parts[0])
+                    day = int(parts[1])
+                    year = int(parts[2])
+                    hour = int(parts[3])
+                    minute = int(parts[4])
+                    ampm = parts[5].upper()
+                    
+                    # Convert to 24-hour format if PM
+                    if ampm == 'PM' and hour < 12:
+                        hour += 12
+                    elif ampm == 'AM' and hour == 12:
+                        hour = 0
+                    
+                    # Create the datetime object
+                    event_datetime = datetime(year, month, day, hour, minute, 0)
+                    app.logger.info(f'Created datetime from raw string: {event_datetime}')
+                    is_exact_user_time = True
+            except Exception as e:
+                app.logger.error(f'Error parsing raw date string: {str(e)}')
+                # Fall back to other methods
+        
+        # If raw parsing failed, try the combined datetime field
+        if event_datetime_str and is_exact_user_time and event_datetime == datetime.now():
+            try:
+                # Parse the ISO format datetime string
+                app.logger.info(f'Parsing event_datetime: {event_datetime_str}')
                 
-            app.logger.info(f'Parsed event date: {event_date}')
-            app.logger.info(f'Final created_at: {created_at}')
-        except ValueError as e:
-            app.logger.error(f'Date parsing error: {str(e)}')
-            return jsonify({'error': 'Invalid date format. Please use ISO format (YYYY-MM-DDTHH:MM:SS)'}), 400
+                # Try different formats for parsing
+                try:
+                    # Standard ISO format
+                    event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                except ValueError:
+                    # Try with strptime
+                    event_datetime = datetime.strptime(event_datetime_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                app.logger.info(f'Successfully parsed event_datetime: {event_datetime}')
+            except Exception as e:
+                app.logger.error(f'Error parsing event_datetime: {str(e)}')
+                # Fall back to separate date/time fields
+                app.logger.info('Falling back to separate date/time fields')
+                
+                # Get the date and time components from the request
+                event_date = data.get('event_date', '')
+                event_time = data.get('event_time', '')
+                
+                if event_date and event_time and is_exact_user_time:
+                    try:
+                        # Parse the components directly
+                        year, month, day = event_date.split('-')
+                        hours, minutes = event_time.split(':')
+                        
+                        # Create a datetime object
+                        event_datetime = datetime(
+                            int(year), int(month), int(day),
+                            int(hours), int(minutes), 0
+                        )
+                        app.logger.info(f'Created datetime from components: {event_datetime}')
+                    except Exception as inner_e:
+                        app.logger.error(f'Error parsing date components: {str(inner_e)}')
+                        # Fall back to current time
+                        event_datetime = datetime.now()
+                        is_exact_user_time = False
+        else:
+            # Fall back to separate date/time fields
+            app.logger.info('No event_datetime provided, checking separate fields')
+            
+            # Get the date and time components from the request
+            event_date = data.get('event_date', '')
+            event_time = data.get('event_time', '')
+            
+            if event_date and event_time and is_exact_user_time:
+                try:
+                    # Parse the components directly
+                    year, month, day = event_date.split('-')
+                    hours, minutes = event_time.split(':')
+                    
+                    # Create a datetime object
+                    event_datetime = datetime(
+                        int(year), int(month), int(day),
+                        int(hours), int(minutes), 0
+                    )
+                    app.logger.info(f'Created datetime from components: {event_datetime}')
+                except Exception as e:
+                    app.logger.error(f'Error parsing date components: {str(e)}')
+                    # Fall back to current time
+                    event_datetime = datetime.now()
+                    is_exact_user_time = False
+        
+        app.logger.info(f'Final event_datetime: {event_datetime}')
+        app.logger.info(f'Final is_exact_user_time: {is_exact_user_time}')
         
         # Create the event with required fields
-        new_event = Event(
-            title=data['title'],
-            description=data.get('description', ''),
-            event_date=event_date,
-            type=data['type'],
-            timeline_id=timeline_id,
-            created_by=1,  # Temporary default user ID
-            created_at=created_at  # Use the adjusted created_at time
-        )
+        try:
+            # Try to create with raw_event_date
+            new_event = Event(
+                title=data['title'],
+                description=data.get('description', ''),
+                event_date=event_datetime,
+                raw_event_date=raw_event_date,  # Store the raw date string
+                type=data['type'],
+                timeline_id=timeline_id,
+                created_by=1,  # Temporary default user ID
+                created_at=datetime.now(),  # Current time for created_at
+                is_exact_user_time=is_exact_user_time  # Save the flag
+            )
+        except Exception as e:
+            app.logger.warning(f'Error creating event with raw_event_date: {str(e)}')
+            # Fall back to creating without raw_event_date
+            new_event = Event(
+                title=data['title'],
+                description=data.get('description', ''),
+                event_date=event_datetime,
+                type=data['type'],
+                timeline_id=timeline_id,
+                created_by=1,  # Temporary default user ID
+                created_at=datetime.now(),  # Current time for created_at
+                is_exact_user_time=is_exact_user_time  # Save the flag
+            )
         
         # Handle optional URL data
         if 'url' in data and data['url']:
@@ -1428,7 +1540,7 @@ def create_timeline_v3_event(timeline_id):
         if 'media_url' in data and data['media_url']:
             new_event.media_url = data['media_url']
             new_event.media_type = data.get('media_type', '')
-            
+        
         # Handle tags
         if 'tags' in data and data['tags']:
             for tag_name in data['tags']:
@@ -1478,8 +1590,8 @@ def create_timeline_v3_event(timeline_id):
                         existing_timeline = Timeline.query.get(tag.timeline_id)
                         if existing_timeline and existing_timeline not in new_event.referenced_in:
                             new_event.referenced_in.append(existing_timeline)
-                    
-                new_event.tags.append(tag)
+                        
+                    new_event.tags.append(tag)
         
         app.logger.info('Attempting to save event to database')
         try:
@@ -1487,14 +1599,28 @@ def create_timeline_v3_event(timeline_id):
             db.session.commit()
             app.logger.info('Event saved successfully')
             
-            # Prepare tags for response
-            tag_list = [{'id': tag.id, 'name': tag.name} for tag in new_event.tags]
+            # Log the event date before returning
+            app.logger.info('===== EVENT RESPONSE DEBUG =====')
+            app.logger.info(f'Event ID: {new_event.id}')
+            app.logger.info(f'Event date before response: {new_event.event_date}')
+            app.logger.info(f'Event date isoformat: {new_event.event_date.isoformat()}')
+            app.logger.info(f'is_exact_user_time: {new_event.is_exact_user_time}')
+            app.logger.info('=================================')
             
-            return jsonify({
+            # Prepare the response
+            response_data = {
                 'id': new_event.id,
                 'title': new_event.title,
                 'description': new_event.description,
                 'event_date': new_event.event_date.isoformat(),
+                'event_date_components': {
+                    'year': new_event.event_date.year,
+                    'month': new_event.event_date.month,
+                    'day': new_event.event_date.day,
+                    'hour': new_event.event_date.hour,
+                    'minute': new_event.event_date.minute,
+                    'second': new_event.event_date.second,
+                },
                 'type': new_event.type,
                 'url': new_event.url,
                 'url_title': new_event.url_title,
@@ -1504,14 +1630,23 @@ def create_timeline_v3_event(timeline_id):
                 'media_type': new_event.media_type,
                 'created_by': new_event.created_by,
                 'created_at': new_event.created_at.isoformat(),
-                'tags': tag_list
-            }), 201
+                'is_exact_user_time': new_event.is_exact_user_time
+            }
+            
+            # Add raw_event_date if it exists
+            try:
+                if hasattr(new_event, 'raw_event_date') and new_event.raw_event_date:
+                    response_data['raw_event_date'] = new_event.raw_event_date
+            except:
+                app.logger.warning('raw_event_date field not available')
+            
+            return jsonify(response_data)
             
         except Exception as db_error:
             db.session.rollback()
             app.logger.error(f'Database error while saving event: {str(db_error)}')
             return jsonify({'error': f'Database error: {str(db_error)}'}), 500
-            
+                
     except Exception as e:
         app.logger.error(f'Error creating event: {str(e)}')
         return jsonify({'error': f'Failed to save event: {str(e)}'}), 500
