@@ -89,125 +89,179 @@ def allowed_audio_file(filename):
 # Function to extract link preview data
 def get_link_preview(url):
     try:
+        # Ensure URL has a scheme
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Get title
-        title = soup.title.string if soup.title else ''
-        
-        # Try to get meta description
-        description = ''
-        description_meta = soup.find('meta', attrs={'name': 'description'}) or soup.find('meta', attrs={'property': 'og:description'})
-        if description_meta and description_meta.get('content'):
-            description = description_meta.get('content')
-        
-        # Try to get image
-        image = ''
-        image_meta = soup.find('meta', attrs={'property': 'og:image'}) or soup.find('meta', attrs={'name': 'twitter:image'})
-        if image_meta and image_meta.get('content'):
-            image = image_meta.get('content')
-            
-        # If no image found, try to find a significant image on the page
-        if not image:
-            # Look for large images in the page
-            images = soup.find_all('img')
-            for img in images:
-                # Skip tiny images, icons, or images without src
-                src = img.get('src', '')
-                if not src or src.startswith('data:'):
-                    continue
-                    
-                # Check for width/height attributes or style containing dimensions
-                width = img.get('width', '0')
-                height = img.get('height', '0')
-                
-                try:
-                    # Convert to integers if possible
-                    width = int(width) if width and width.isdigit() else 0
-                    height = int(height) if height and height.isdigit() else 0
-                    
-                    # If the image is reasonably sized, use it
-                    if width > 100 and height > 100:
-                        # Convert relative URL to absolute
-                        if not src.startswith(('http://', 'https://')):
-                            base_url = urlparse(url)
-                            base_domain = f"{base_url.scheme}://{base_url.netloc}"
-                            if src.startswith('/'):
-                                src = f"{base_domain}{src}"
-                            else:
-                                src = f"{base_domain}/{src}"
-                        
-                        image = src
-                        break
-                except (ValueError, TypeError):
-                    continue
-        
-        # Get source domain
+        # Parse the URL to get domain information
         parsed_url = urlparse(url)
-        source = parsed_url.netloc
+        domain = parsed_url.netloc.lower()
         
-        # Special handling for Google searches
-        if 'google.com' in source and '/search' in parsed_url.path:
-            query_params = parse_qs(parsed_url.query)
+        try:
+            # Try to fetch the page content
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
             
-            # Extract search query
-            if 'q' in query_params:
-                search_query = query_params['q'][0]
-                if not title or 'Google Search' in title:
-                    title = f"Google Search: {search_query}"
-                if not description:
-                    description = f"Search results for: {search_query}"
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Get title - first try Open Graph, then regular title
+            title = ''
+            og_title = soup.find('meta', property='og:title')
+            if og_title and og_title.get('content'):
+                title = og_title.get('content')
+            elif soup.title:
+                title = soup.title.string
                 
-                # If it's an image search, mention that
-                if '/images' in parsed_url.path or 'tbm=isch' in url:
-                    title = f"Google Image Search: {search_query}"
-                    description = f"Image search results for: {search_query}"
+            # Try to get meta description - first Open Graph, then regular meta description
+            description = ''
+            og_description = soup.find('meta', property='og:description')
+            if og_description and og_description.get('content'):
+                description = og_description.get('content')
+            else:
+                description_meta = soup.find('meta', attrs={'name': 'description'})
+                if description_meta and description_meta.get('content'):
+                    description = description_meta.get('content')
             
-            # If no image yet, use Google logo
+            # Try to get image - first Open Graph, then Twitter card, then look for significant images
+            image = ''
+            og_image = soup.find('meta', property='og:image')
+            if og_image and og_image.get('content'):
+                image = og_image.get('content')
+            else:
+                twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
+                if twitter_image and twitter_image.get('content'):
+                    image = twitter_image.get('content')
+                else:
+                    # Look for favicon as a fallback
+                    favicon = soup.find('link', rel='icon') or soup.find('link', rel='shortcut icon')
+                    if favicon and favicon.get('href'):
+                        favicon_url = favicon.get('href')
+                        # Convert relative URL to absolute
+                        if not favicon_url.startswith(('http://', 'https://')):
+                            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                            if favicon_url.startswith('/'):
+                                favicon_url = f"{base_url}{favicon_url}"
+                            else:
+                                favicon_url = f"{base_url}/{favicon_url}"
+                        image = favicon_url
+                    else:
+                        # If no favicon, look for significant images
+                        images = soup.find_all('img')
+                        for img in images:
+                            # Skip tiny images, icons, or images without src
+                            src = img.get('src', '')
+                            if not src or src.startswith('data:'):
+                                continue
+                                
+                            # Check for width/height attributes
+                            width = img.get('width', '0')
+                            height = img.get('height', '0')
+                            
+                            try:
+                                # Convert to integers if possible
+                                width = int(width) if width and width.isdigit() else 0
+                                height = int(height) if height and height.isdigit() else 0
+                                
+                                # If the image is reasonably sized, use it
+                                if width > 100 and height > 100:
+                                    # Convert relative URL to absolute
+                                    if not src.startswith(('http://', 'https://')):
+                                        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                                        if src.startswith('/'):
+                                            src = f"{base_url}{src}"
+                                        else:
+                                            src = f"{base_url}/{src}"
+                                    
+                                    image = src
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+            
+            # If we still don't have an image, try to guess a logo URL
             if not image:
-                image = "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"
-        
-        # Special handling for YouTube
-        elif 'youtube.com' in source or 'youtu.be' in source:
-            # If no image yet, try to get YouTube thumbnail
-            if not image:
-                video_id = None
-                if 'youtube.com/watch' in url and 'v=' in url:
-                    query_params = parse_qs(parsed_url.query)
-                    if 'v' in query_params:
-                        video_id = query_params['v'][0]
-                elif 'youtu.be/' in url:
-                    video_id = url.split('youtu.be/')[1].split('?')[0]
+                # Try common logo paths
+                common_logo_paths = [
+                    '/logo.png', 
+                    '/images/logo.png', 
+                    '/assets/logo.png',
+                    '/img/logo.png',
+                    '/static/logo.png',
+                    '/favicon.ico'
+                ]
                 
-                if video_id:
-                    image = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+                for path in common_logo_paths:
+                    logo_url = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
+                    try:
+                        logo_response = requests.head(logo_url, timeout=2)
+                        if logo_response.status_code == 200:
+                            image = logo_url
+                            break
+                    except:
+                        continue
             
-            # If no description, provide a generic one
-            if not description:
-                description = "YouTube video"
-        
-        # Special handling for Twitter/X
-        elif 'twitter.com' in source or 'x.com' in source:
-            if not image:
-                image = "https://abs.twimg.com/responsive-web/client-web/icon-default.522d363a.png"
-            if not description:
-                description = "Tweet from Twitter/X"
-        
-        return {
-            'title': title,
-            'description': description,
-            'image': image,
-            'source': source,
-            'url': url
-        }
+            # Get source domain for display
+            source = domain
+            
+            return {
+                'title': title,
+                'description': description,
+                'image': image,
+                'source': source,
+                'url': url
+            }
+            
+        except Exception as e:
+            app.logger.error(f'Error fetching URL content: {str(e)}')
+            
+            # If we couldn't fetch the page, return a basic response based on the URL
+            domain_parts = domain.split('.')
+            site_name = domain_parts[-2] if len(domain_parts) >= 2 else domain
+            
+            # Capitalize the site name
+            site_name = site_name.capitalize()
+            
+            return {
+                'title': f"{site_name} Link",
+                'description': f"Link to content on {domain}",
+                'image': f"{parsed_url.scheme}://{domain}/favicon.ico",  # Try common favicon location
+                'source': domain,
+                'url': url
+            }
+            
     except Exception as e:
-        app.logger.error(f'Error fetching link preview: {str(e)}')
-        return None
+        app.logger.error(f'Error in get_link_preview: {str(e)}')
+        
+        # Last resort fallback
+        try:
+            # Try to extract domain from URL
+            if '://' in url:
+                domain = url.split('://')[1].split('/')[0]
+            else:
+                domain = url.split('/')[0]
+                
+            site_name = domain.split('.')[-2] if len(domain.split('.')) >= 2 else domain
+            site_name = site_name.capitalize()
+            
+            return {
+                'title': f"{site_name} Link",
+                'description': "Could not fetch preview for this URL",
+                'image': "",
+                'source': domain,
+                'url': url
+            }
+        except:
+            # Absolute last resort
+            return {
+                'title': url,
+                'description': "Could not fetch preview for this URL",
+                'image': "",
+                'source': "",
+                'url': url
+            }
 
 # Models
 class UserMusic(db.Model):
