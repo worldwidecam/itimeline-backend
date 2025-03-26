@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
+from routes.upload import upload_bp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,47 +35,52 @@ app.config.update(
     JWT_REFRESH_TOKEN_EXPIRES=timedelta(days=30),  # 30 days refresh token
     JWT_TOKEN_LOCATION=['headers'],
     JWT_HEADER_NAME='Authorization',
-    JWT_HEADER_TYPE='Bearer'
+    JWT_HEADER_TYPE='Bearer',
+    UPLOAD_FOLDER=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads')
 )
 
 # Initialize extensions
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
+# Register blueprints
+app.register_blueprint(upload_bp)
+
+# Configure CORS to allow frontend to access backend resources
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
 # Ensure the database exists
 with app.app_context():
     db.create_all()
 
-# Configure CORS
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            'http://localhost:3000',
-            'http://localhost:3001',
-            'http://localhost:3002',
-            'http://localhost:3003',
-            'https://timeline-forum.onrender.com',
-            'https://timeline-forum-frontend.onrender.com',
-            'https://worldwidecam.com',
-            'https://www.worldwidecam.com',
-            'https://i-timeline.com',
-            'https://www.i-timeline.com'
-        ],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Refresh-Token"],
-        "supports_credentials": True,
-        "expose_headers": ["Content-Type", "Authorization"]
-    }
-})
-
 # Configure upload paths
 base_dir = os.path.abspath(os.path.dirname(__file__))
-app.config['UPLOAD_FOLDER'] = os.path.join(base_dir, 'static', 'uploads')
 app.config['STATIC_FOLDER'] = os.path.join(base_dir, 'static')
+app.config['UPLOAD_FOLDER'] = os.path.join(base_dir, 'static', 'uploads')
 
 # Create necessary directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(app.config['STATIC_FOLDER'], exist_ok=True)
+
+# Explicitly configure Flask to serve static files
+app.static_folder = app.config['STATIC_FOLDER']
+app.static_url_path = '/static'
+
+# Add a direct route to serve uploaded files
+@app.route('/uploads/<path:filename>')
+def serve_uploaded_file(filename):
+    """Serve uploaded files directly."""
+    print(f"Direct request for file: {filename}")
+    upload_folder = os.path.join(app.root_path, 'static', 'uploads')
+    if os.path.exists(os.path.join(upload_folder, filename)):
+        print(f"File found, serving: {filename} from {upload_folder}")
+        response = send_from_directory(upload_folder, filename)
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    else:
+        print(f"File not found: {filename} in {upload_folder}")
+        return jsonify({'error': 'File not found'}), 404
 
 # File upload configuration
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
@@ -531,8 +537,10 @@ def upload_file():
 def serve_file(filename):
     # For backward compatibility with existing data
     # If the file exists locally, serve it
-    if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
-        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    upload_folder = os.path.join(app.root_path, 'static', 'uploads')
+    if os.path.exists(os.path.join(upload_folder, filename)):
+        print(f"Serving file: {filename} from {upload_folder}")
+        return send_from_directory(upload_folder, filename)
     else:
         # For files that might have been migrated to Cloudinary
         # This is a fallback that will redirect to a 404 page
@@ -1232,7 +1240,7 @@ def update_profile():
             'avatar_url': user.avatar_url,
             'bio': user.bio
         }), 200
-
+        
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error updating profile: {str(e)}")
@@ -1400,6 +1408,11 @@ def get_timeline_v3_events(timeline_id):
                             'is_original_timeline': True  # Flag to identify this as the original timeline
                         })
             
+            # Get the username of the creator
+            creator = User.query.get(event.created_by)
+            creator_username = creator.username if creator else "Unknown"
+            creator_avatar = creator.avatar_url if creator else None
+            
             # Create event JSON
             event_json = {
                 'id': event.id,
@@ -1415,6 +1428,8 @@ def get_timeline_v3_events(timeline_id):
                 'media_type': event.media_type,
                 'timeline_id': event.timeline_id,
                 'created_by': event.created_by,
+                'created_by_username': creator_username,  # Add username to the response
+                'created_by_avatar': creator_avatar,      # Add avatar URL to the response
                 'created_at': event.created_at.isoformat(),
                 'is_exact_user_time': event.is_exact_user_time,  # Include the flag
                 'tags': tags
@@ -1784,6 +1799,101 @@ def url_preview():
     except Exception as e:
         app.logger.error(f'Error in URL preview endpoint: {str(e)}')
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_user_profile(user_id):
+    """
+    Get a user's profile by ID
+    """
+    try:
+        # Get the current user making the request
+        current_user_id = get_jwt_identity()
+        
+        # Find the requested user
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get user's music preferences if they exist
+        music_data = None
+        if user.music:
+            music_data = {
+                'music_url': user.music.music_url,
+                'music_platform': user.music.music_platform
+            }
+            
+        # Return user data (excluding sensitive information)
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'bio': user.bio,
+            'avatar_url': user.avatar_url,
+            'created_at': user.created_at.isoformat(),
+            'music': music_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user profile: {str(e)}")
+        return jsonify({'error': 'An error occurred while fetching the user profile'}), 500
+
+@app.route('/api/users/<int:user_id>/events', methods=['GET'])
+@jwt_required()
+def get_user_events(user_id):
+    """
+    Get events created by a specific user
+    """
+    try:
+        # Get the current user making the request
+        current_user_id = get_jwt_identity()
+        
+        # Check if the requested user exists
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get events created by the user, ordered by creation date (newest first)
+        events = Event.query.filter_by(created_by=user_id).order_by(Event.created_at.desc()).all()
+        
+        # Format the events
+        events_data = []
+        for event in events:
+            # Get the tags for this event
+            tags = [tag.name for tag in event.tags]
+            
+            # Get the creator's username
+            creator = User.query.get(event.created_by)
+            creator_username = creator.username if creator else "Unknown"
+            creator_avatar = creator.avatar_url if creator else None
+            
+            # Format the event data
+            event_data = {
+                'id': event.id,
+                'title': event.title,
+                'description': event.description,
+                'event_date': event.event_date.isoformat() if event.event_date else None,
+                'type': event.type,
+                'url': event.url,
+                'url_title': event.url_title,
+                'url_description': event.url_description,
+                'url_image': event.url_image,
+                'media_url': event.media_url,
+                'media_type': event.media_type,
+                'timeline_id': event.timeline_id,
+                'created_by': event.created_by,
+                'created_by_username': creator_username,
+                'created_by_avatar': creator_avatar,
+                'created_at': event.created_at.isoformat(),
+                'tags': tags
+            }
+            events_data.append(event_data)
+            
+        return jsonify(events_data), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user events: {str(e)}")
+        return jsonify({'error': 'An error occurred while fetching the user events'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

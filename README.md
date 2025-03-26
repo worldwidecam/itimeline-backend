@@ -159,3 +159,37 @@ The backend provides the following main API endpoints:
 - **Database Issues**: If you encounter database errors, try running `python reset_db.py` to reset the database
 - **File Upload Issues**: Check Cloudinary credentials and connectivity
 - **CORS Issues**: Ensure the frontend URL is correctly set in the CORS configuration
+
+## Known Issues
+
+### Media File Serving for Event Cards
+
+**Issue Description**: Media files uploaded via the `/api/upload-media` endpoint are not displaying correctly in the frontend MediaCard and EventPopup components, despite being successfully uploaded to the server.
+
+**Current Status**: As of March 25, 2025, we've attempted several approaches to fix this issue:
+
+1. Added detailed logging to the upload_media function to confirm files are being saved correctly
+2. Created a dedicated route (`/uploads/<filename>`) for serving uploaded files with explicit cache control headers
+3. Updated the CORS configuration to allow all origins to access resources
+4. Ensured the static file serving configuration is correctly set up
+5. Verified that the upload directory exists and has proper permissions
+
+**Troubleshooting Findings**:
+- The upload_media endpoint successfully receives and saves files to the server
+- The endpoint returns the correct URL path for the uploaded files
+- The static file serving functionality appears to be working for other static assets
+- Despite these changes, media files are not being displayed in the frontend
+
+**Possible Causes**:
+- There might be an issue with how the static files are being served from the uploads directory
+- The URL format returned by the upload_media endpoint might not be compatible with how the frontend expects to receive it
+- There could be permission issues with the uploaded files
+- Browser caching might be preventing the media from displaying
+
+**Next Steps**:
+- Compare the implementation with the working profile avatar and music upload functionality
+- Test the file serving routes directly in a browser to ensure they're accessible
+- Consider implementing a different approach to file storage and retrieval
+- Investigate potential MIME type issues with the served files
+
+This issue is a high priority for the next development sprint.
