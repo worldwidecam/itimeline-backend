@@ -1773,5 +1773,52 @@ def url_preview():
         app.logger.error(f'Error in URL preview endpoint: {str(e)}')
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/users/<user_id>', methods=['GET'])
+def get_user_profile(user_id):
+    """Get a user's profile by ID."""
+    try:
+        app.logger.info(f'Fetching user profile for user ID: {user_id}')
+        user = User.query.get(user_id)
+        
+        if not user:
+            app.logger.warning(f'User not found with ID: {user_id}')
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Return user profile data without sensitive information
+        user_data = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'bio': user.bio,
+            'avatar_url': user.avatar_url,
+            'created_at': user.created_at.isoformat() if user.created_at else None
+        }
+        
+        return jsonify(user_data)
+    except Exception as e:
+        app.logger.error(f'Error fetching user profile: {str(e)}')
+        return jsonify({'error': f'Failed to fetch user profile: {str(e)}'}), 500
+
+@app.route('/api/users/<user_id>/music', methods=['GET'])
+def get_user_music(user_id):
+    """Get a user's music preferences by ID."""
+    try:
+        app.logger.info(f'Fetching music preferences for user ID: {user_id}')
+        user_music = UserMusic.query.filter_by(user_id=user_id).first()
+        
+        if not user_music or not user_music.music_url:
+            app.logger.warning(f'No music preferences found for user ID: {user_id}')
+            return jsonify({'error': 'No music preferences found'}), 404
+        
+        music_data = {
+            'music_url': user_music.music_url,
+            'music_platform': user_music.music_platform
+        }
+        
+        return jsonify(music_data)
+    except Exception as e:
+        app.logger.error(f'Error fetching user music preferences: {str(e)}')
+        return jsonify({'error': f'Failed to fetch music preferences: {str(e)}'}), 500
+
 if __name__ == '__main__':
     app.run(debug=True)
