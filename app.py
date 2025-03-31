@@ -1372,53 +1372,23 @@ def get_timeline_v3_events(timeline_id):
         events_json = []
         for event in all_events:
             # Get tags for this event
-            tags = [{'id': tag.id, 'name': tag.name} for tag in event.tags]
+            app.logger.info(f"Event ID {event.id} has {len(event.tags)} tags")
+            tags = []
+            for tag in event.tags:
+                app.logger.info(f"Processing tag: {tag.name} (ID: {tag.id})")
+                tags.append({'id': tag.id, 'name': tag.name})
             
-            # Add the original timeline's tag if viewing from a different timeline
-            if event.timeline_id != int(timeline_id):
-                original_timeline = Timeline.query.get(event.timeline_id)
-                if original_timeline:
-                    # Check if the original timeline's tag is already in the list
-                    original_tag_name = original_timeline.name.lower()
-                    
-                    # Check for both normal and hashtag-prefixed versions (for backward compatibility)
-                    tag_exists = False
-                    for tag in tags:
-                        if tag['name'].lower() == original_tag_name:
-                            tag_exists = True
-                            break
-                    
-                    # Add the original timeline's tag if it's not already there
-                    if not tag_exists:
-                        # Find or create a tag for the original timeline
-                        original_tag = Tag.query.filter(db.func.lower(Tag.name) == original_tag_name).first()
-                        if not original_tag:
-                            original_tag = Tag(
-                                name=original_tag_name,
-                                timeline_id=original_timeline.id
-                            )
-                            db.session.add(original_tag)
-                            db.session.flush()  # Get the timeline ID
-                        tag.timeline_id = original_tag.id
-                        
-                        # Add the tag to the event's tags list
-                        tags.append({
-                            'id': original_tag.id,
-                            'name': original_tag.name,
-                            'is_original_timeline': True  # Flag to identify this as the original timeline
-                        })
-            
-            # Get the username of the creator
+            # Get the creator's username
             creator = User.query.get(event.created_by)
             creator_username = creator.username if creator else "Unknown"
             creator_avatar = creator.avatar_url if creator else None
             
-            # Create event JSON
-            event_json = {
+            # Format the event data
+            event_data = {
                 'id': event.id,
                 'title': event.title,
                 'description': event.description,
-                'event_date': event.event_date.isoformat(),
+                'event_date': event.event_date.isoformat() if event.event_date else None,
                 'type': event.type,
                 'url': event.url,
                 'url_title': event.url_title,
@@ -1428,13 +1398,14 @@ def get_timeline_v3_events(timeline_id):
                 'media_type': event.media_type,
                 'timeline_id': event.timeline_id,
                 'created_by': event.created_by,
-                'created_by_username': creator_username,  # Add username to the response
-                'created_by_avatar': creator_avatar,      # Add avatar URL to the response
+                'created_by_username': creator_username,
+                'created_by_avatar': creator_avatar,
                 'created_at': event.created_at.isoformat(),
-                'is_exact_user_time': event.is_exact_user_time,  # Include the flag
                 'tags': tags
             }
-            events_json.append(event_json)
+            
+            app.logger.info(f"Event data for ID {event.id} includes {len(tags)} tags")
+            events_json.append(event_data)
         
         return jsonify(events_json), 200
         
@@ -1612,15 +1583,19 @@ def create_timeline_v3_event(timeline_id):
         
         # Handle tags
         if 'tags' in data and data['tags']:
+            app.logger.info(f"Processing tags: {data['tags']}")
             for tag_name in data['tags']:
                 # Clean tag name
                 tag_name = tag_name.strip().lower()
                 if not tag_name:
                     continue
                     
+                app.logger.info(f"Processing tag: {tag_name}")
+                    
                 # Find or create tag (case insensitive)
                 tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
                 if not tag:
+                    app.logger.info(f"Creating new tag: {tag_name}")
                     # Create new tag
                     tag = Tag(name=tag_name)
                     db.session.add(tag)
@@ -1638,6 +1613,7 @@ def create_timeline_v3_event(timeline_id):
                     ).first()
                     
                     if not tag_timeline:
+                        app.logger.info(f"Creating new timeline for tag: {capitalized_tag_name}")
                         # Create a new timeline with ALL CAPS name
                         tag_timeline = Timeline(
                             name=capitalized_tag_name,
@@ -1648,19 +1624,24 @@ def create_timeline_v3_event(timeline_id):
                         db.session.flush()  # Get the timeline ID
                         tag.timeline_id = tag_timeline.id
                     else:
+                        app.logger.info(f"Using existing timeline for tag: {tag_timeline.name} (ID: {tag_timeline.id})")
                         # Use existing timeline
                         tag.timeline_id = tag_timeline.id
 
                     # Add this event as a reference in the timeline
                     new_event.referenced_in.append(tag_timeline)
                 else:
+                    app.logger.info(f"Using existing tag: {tag.name} (ID: {tag.id})")
                     # If tag exists, ensure this event is added to the corresponding timeline
                     if tag.timeline_id:
                         existing_timeline = Timeline.query.get(tag.timeline_id)
                         if existing_timeline and existing_timeline not in new_event.referenced_in:
+                            app.logger.info(f"Adding event to existing timeline: {existing_timeline.name} (ID: {existing_timeline.id})")
                             new_event.referenced_in.append(existing_timeline)
                         
-                    new_event.tags.append(tag)
+                # Always add the tag to the event
+                app.logger.info(f"Adding tag to event: {tag.name} (ID: {tag.id})")
+                new_event.tags.append(tag)
         
         app.logger.info('Attempting to save event to database')
         try:
