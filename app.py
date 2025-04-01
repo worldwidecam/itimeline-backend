@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import os
+import platform
 import logging
 import time
 import requests
@@ -19,6 +20,8 @@ from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
 from routes.upload import upload_bp
+import sqlalchemy
+from sqlalchemy import text
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1403,8 +1406,6 @@ def get_timeline_v3_events(timeline_id):
                 'created_at': event.created_at.isoformat(),
                 'tags': tags
             }
-            
-            app.logger.info(f"Event data for ID {event.id} includes {len(tags)} tags")
             events_json.append(event_data)
         
         return jsonify(events_json), 200
@@ -1875,6 +1876,51 @@ def get_user_events(user_id):
     except Exception as e:
         logger.error(f"Error getting user events: {str(e)}")
         return jsonify({'error': 'An error occurred while fetching the user events'}), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint that doesn't require authentication.
+    Returns basic information about the API status and environment.
+    """
+    try:
+        # Test database connection
+        db_status = "connected"
+        try:
+            db.session.execute(text("SELECT 1"))
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+        
+        # Get environment information
+        env_info = {
+            "environment": os.environ.get("FLASK_ENV", "development"),
+            "debug_mode": app.debug,
+            "api_version": "1.0.0",
+            "python_version": platform.python_version(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Check CORS configuration
+        cors_config = {
+            "origins": app.config.get("CORS_ORIGINS", "*"),
+            "methods": app.config.get("CORS_METHODS", "GET,POST,PUT,DELETE,OPTIONS"),
+            "headers": app.config.get("CORS_HEADERS", "Content-Type,Authorization")
+        }
+        
+        # Return comprehensive health information
+        return jsonify({
+            "status": "ok",
+            "database": db_status,
+            "environment": env_info,
+            "cors": cors_config,
+            "message": "iTimeline API is running"
+        })
+    except Exception as e:
+        app.logger.error(f"Health check failed: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Health check failed: {str(e)}"
+        }), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
