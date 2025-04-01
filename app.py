@@ -1878,6 +1878,7 @@ def get_user_events(user_id):
         return jsonify({'error': 'An error occurred while fetching the user events'}), 500
 
 @app.route('/api/health', methods=['GET'])
+@app.route('/api/health-check', methods=['GET'])  # Add an alias for the health check endpoint
 def health_check():
     """
     Health check endpoint that doesn't require authentication.
@@ -1921,6 +1922,15 @@ def health_check():
             "status": "error",
             "message": f"Health check failed: {str(e)}"
         }), 500
+
+@app.route('/', methods=['GET'])
+def root():
+    """
+    Root endpoint that returns a simple message to verify the server is running.
+    """
+    return jsonify({
+        "message": "iTimeline API is running. Use /api/health for detailed status."
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
