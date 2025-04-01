@@ -3,7 +3,7 @@ services:
     name: itimeline-backend
     env: python
     buildCommand: ./build.sh
-    startCommand: gunicorn app:app
+    startCommand: gunicorn wsgi:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
