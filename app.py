@@ -31,7 +31,7 @@ app = Flask(__name__)
 
 # Basic configurations
 app.config.update(
-    SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL').replace('postgres://', 'postgresql://') if os.getenv('DATABASE_URL') else 'sqlite:///timeline_forum.db',
+    SQLALCHEMY_DATABASE_URI='sqlite:///timeline_forum.db',  # Temporarily using SQLite for local testing
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     JWT_SECRET_KEY=os.getenv('JWT_SECRET_KEY', 'your-secret-key'),  # Change this in production
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=4),  # Increased from 1 hour to 4 hours
@@ -50,7 +50,10 @@ jwt = JWTManager(app)
 app.register_blueprint(upload_bp)
 
 # Configure CORS to allow frontend to access backend resources
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+allowed_origins = [frontend_url, 'http://localhost:3000', 'https://i-timeline.com']
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
+print(f"CORS configured with allowed origins: {allowed_origins}")
 
 # Ensure the database exists
 with app.app_context():
@@ -1933,4 +1936,4 @@ def root():
     })
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
