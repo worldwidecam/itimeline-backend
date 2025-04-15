@@ -21,7 +21,7 @@ def upload_file(file, folder="timeline_forum", **options):
     Upload a file to Cloudinary with optional transformations
     
     Args:
-        file: File object to upload
+        file: File object to upload (can be a file-like object or a path)
         folder: Folder name in Cloudinary to store the file
         options: Additional options for upload (transformations, etc.)
         
@@ -35,15 +35,38 @@ def upload_file(file, folder="timeline_forum", **options):
             'resource_type': "auto",  # Automatically detect resource type (image, video, etc.)
         }
         
+        # Check if the file has a content_type attribute
+        has_content_type = hasattr(file, 'content_type') and file.content_type
+        
+        # Check if the file is an image
+        is_image = False
+        if has_content_type and file.content_type.startswith('image/'):
+            is_image = True
+        elif hasattr(file, 'filename') and file.filename:
+            # Try to determine content type from filename
+            import mimetypes
+            mime_type, _ = mimetypes.guess_type(file.filename)
+            is_image = mime_type and mime_type.startswith('image/')
+        
         # For images, add auto-optimization by default
-        if hasattr(file, 'content_type') and file.content_type.startswith('image/'):
+        if is_image:
             default_options.update({
                 'quality': 'auto',  # Auto-select optimal quality
                 'fetch_format': 'auto',  # Auto-select optimal format
             })
         
+        # Check if the file is an audio file
+        is_audio = False
+        if has_content_type and file.content_type.startswith('audio/'):
+            is_audio = True
+        elif hasattr(file, 'filename') and file.filename:
+            # Try to determine content type from filename
+            import mimetypes
+            mime_type, _ = mimetypes.guess_type(file.filename)
+            is_audio = mime_type and mime_type.startswith('audio/')
+        
         # For audio files, add specific optimizations
-        elif hasattr(file, 'content_type') and file.content_type.startswith('audio/'):
+        if is_audio:
             default_options.update({
                 'resource_type': 'raw',  # Use raw for audio files to prevent transcoding issues
             })
@@ -52,11 +75,34 @@ def upload_file(file, folder="timeline_forum", **options):
         upload_options = {**default_options, **options}
         
         # Print debug info
-        print(f"Uploading file to Cloudinary: {file.filename}")
+        print(f"Uploading file to Cloudinary: {file.filename if hasattr(file, 'filename') else file.name}")
         print(f"Content type: {file.content_type if hasattr(file, 'content_type') else 'unknown'}")
-        print(f"Upload options: {upload_options}")
+        
+        # Check if we need to handle a file without filename attribute
+        if not hasattr(file, 'filename') and hasattr(file, 'name'):
+            # For standard file objects that have 'name' but not 'filename'
+            print(f"Using file.name as filename: {file.name}")
+            
+            # Create a temporary file with the correct attributes
+            from werkzeug.datastructures import FileStorage
+            import os
+            
+            # Get the original file content
+            original_position = file.tell()
+            file.seek(0)
+            content = file.read()
+            file.seek(original_position)  # Reset position
+            
+            # Create a FileStorage object
+            temp_file = FileStorage(
+                stream=file,
+                filename=os.path.basename(file.name) if hasattr(file, 'name') else 'uploaded_file',
+                content_type=None
+            )
+            file = temp_file
         
         # Upload the file to Cloudinary
+        print(f"Uploading file to Cloudinary with options: {upload_options}")
         result = cloudinary.uploader.upload(file, **upload_options)
         
         print(f"Upload successful: {result['secure_url']}")

@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
 from routes.upload import upload_bp
+from routes.media import media_bp
 import sqlalchemy
 from sqlalchemy import text
 
@@ -48,6 +49,7 @@ jwt = JWTManager(app)
 
 # Register blueprints
 app.register_blueprint(upload_bp)
+app.register_blueprint(media_bp)
 
 # Configure CORS to allow frontend to access backend resources
 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
@@ -71,22 +73,54 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 app.static_folder = app.config['STATIC_FOLDER']
 app.static_url_path = '/static'
 
-# Add a direct route to serve uploaded files
+# Add direct routes to serve uploaded files from both possible locations
 @app.route('/uploads/<path:filename>')
 def serve_uploaded_file(filename):
-    """Serve uploaded files directly."""
-    print(f"Direct request for file: {filename}")
-    upload_folder = os.path.join(app.root_path, 'static', 'uploads')
-    if os.path.exists(os.path.join(upload_folder, filename)):
-        print(f"File found, serving: {filename} from {upload_folder}")
-        response = send_from_directory(upload_folder, filename)
+    """Serve uploaded files directly from /uploads path."""
+    print(f"Direct request for file via /uploads/: {filename}")
+    
+    # Check in the static/uploads folder first (newer uploads)
+    static_upload_folder = os.path.join(app.root_path, 'static', 'uploads')
+    if os.path.exists(os.path.join(static_upload_folder, filename)):
+        print(f"File found in static/uploads: {filename}")
+        response = send_from_directory(static_upload_folder, filename)
         response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'
         return response
-    else:
-        print(f"File not found: {filename} in {upload_folder}")
-        return jsonify({'error': 'File not found'}), 404
+    
+    # If not found, check in the uploads folder (older uploads)
+    uploads_folder = os.path.join(app.root_path, 'uploads')
+    if os.path.exists(os.path.join(uploads_folder, filename)):
+        print(f"File found in uploads: {filename}")
+        response = send_from_directory(uploads_folder, filename)
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    
+    # If still not found, return 404
+    print(f"File not found: {filename} in either {static_upload_folder} or {uploads_folder}")
+    return jsonify({'error': 'File not found'}), 404
+
+@app.route('/static/uploads/<path:filename>')
+def serve_static_uploaded_file(filename):
+    """Serve uploaded files directly from /static/uploads path."""
+    print(f"Direct request for file via /static/uploads/: {filename}")
+    
+    # Check in the static/uploads folder
+    static_upload_folder = os.path.join(app.root_path, 'static', 'uploads')
+    if os.path.exists(os.path.join(static_upload_folder, filename)):
+        print(f"File found in static/uploads: {filename}")
+        response = send_from_directory(static_upload_folder, filename)
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+    
+    # If not found, return 404
+    print(f"File not found: {filename} in {static_upload_folder}")
+    return jsonify({'error': 'File not found'}), 404
 
 # File upload configuration
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
