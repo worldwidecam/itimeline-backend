@@ -1666,20 +1666,40 @@ def create_timeline_v3_event(timeline_id):
                         # Use existing timeline
                         tag.timeline_id = tag_timeline.id
 
-                    # Add this event as a reference in the timeline
-                    new_event.referenced_in.append(tag_timeline)
+                    # Add this event as a reference in the timeline, but only if it's not the same as the current timeline
+                    current_timeline = Timeline.query.get(timeline_id)
+                    if current_timeline and tag_timeline.name.lower() != current_timeline.name.lower():
+                        app.logger.info(f"Adding reference to tag timeline: {tag_timeline.name} (ID: {tag_timeline.id})")
+                        new_event.referenced_in.append(tag_timeline)
+                    else:
+                        app.logger.info(f"Skipping reference to current timeline: {tag_timeline.name} (ID: {tag_timeline.id})")
                 else:
                     app.logger.info(f"Using existing tag: {tag.name} (ID: {tag.id})")
                     # If tag exists, ensure this event is added to the corresponding timeline
                     if tag.timeline_id:
                         existing_timeline = Timeline.query.get(tag.timeline_id)
+                        current_timeline = Timeline.query.get(timeline_id)
+                        
+                        # Only add the reference if it's not the same as the current timeline
                         if existing_timeline and existing_timeline not in new_event.referenced_in:
-                            app.logger.info(f"Adding event to existing timeline: {existing_timeline.name} (ID: {existing_timeline.id})")
-                            new_event.referenced_in.append(existing_timeline)
+                            # Compare timeline names case-insensitively
+                            if current_timeline and existing_timeline.name.lower() != current_timeline.name.lower():
+                                app.logger.info(f"Adding event to existing timeline: {existing_timeline.name} (ID: {existing_timeline.id})")
+                                new_event.referenced_in.append(existing_timeline)
+                            else:
+                                app.logger.info(f"Skipping reference to current timeline: {existing_timeline.name} (ID: {existing_timeline.id})")
                         
                 # Always add the tag to the event
                 app.logger.info(f"Adding tag to event: {tag.name} (ID: {tag.id})")
                 new_event.tags.append(tag)
+                
+                # Check if this tag's timeline is the same as the current timeline
+                # If so, don't add it as a reference to prevent duplication
+                current_timeline = Timeline.query.get(timeline_id)
+                if current_timeline and tag.timeline_id:
+                    tag_timeline_name = Timeline.query.get(tag.timeline_id).name.lower() if Timeline.query.get(tag.timeline_id) else None
+                    current_timeline_name = current_timeline.name.lower()
+                    app.logger.info(f"Comparing timelines: tag timeline '{tag_timeline_name}' vs current timeline '{current_timeline_name}'")
         
         app.logger.info('Attempting to save event to database')
         try:
