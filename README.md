@@ -129,30 +129,78 @@ The application is configured for deployment on Render.com with the following se
 
 ## API Documentation
 
-The backend provides the following main API endpoints:
+We've added interactive API documentation to make development easier and more fun!
 
-- **Authentication**:
-  - `POST /auth/register`: Register a new user
-  - `POST /auth/login`: Log in an existing user
-  - `POST /auth/logout`: Log out the current user
+### Documentation Features
 
-- **Timelines**:
-  - `GET /timelines`: Get all timelines
-  - `POST /timelines`: Create a new timeline
-  - `GET /timelines/<id>`: Get a specific timeline
-  - `PUT /timelines/<id>`: Update a timeline
-  - `DELETE /timelines/<id>`: Delete a timeline
+- **Interactive API Explorer**: Try out API calls right in your browser
+- **Request/Response Examples**: See exactly what data to send and what you'll get back
+- **Authentication Support**: Test protected endpoints with your JWT token
+- **Organized by Category**: Endpoints grouped by function (auth, timelines, events, etc.)
 
-- **Events**:
-  - `GET /events`: Get all events
-  - `POST /events`: Create a new event
-  - `GET /events/<id>`: Get a specific event
-  - `PUT /events/<id>`: Update an event
-  - `DELETE /events/<id>`: Delete an event
+### How to Use the Documentation
 
-- **File Uploads**:
-  - `POST /upload`: Upload a file
-  - `GET /uploads/<filename>`: Serve a file
+1. **Start the Documentation Server**:
+   ```bash
+   python docs_integration.py
+   ```
+
+2. **Access the Documentation**:
+   - **OpenAPI JSON**: http://localhost:5000/openapi
+   - **Interactive UI**: http://localhost:5000/swagger-ui
+
+3. **Explore and Test**:
+   - Browse the available endpoints
+   - Click on any endpoint to see details
+   - Try out API calls directly from the UI
+   - See response codes and formats
+
+### Documentation Files
+
+- **api_docs.py**: Defines schemas and documentation setup
+- **docs_integration.py**: Connects documentation to existing endpoints
+- **simple_docs_demo.py**: Simplified example for quick testing
+
+### Adding to Render Deployment
+
+To enable API documentation on your Render deployment:
+
+1. Add these dependencies to your `requirements.txt`:
+   ```bash
+   apispec>=1.0.0
+   flask-apispec>=0.8.0
+   ```
+
+2. Push the documentation files to your repository
+
+3. Update your Render service to run with documentation enabled
+
+## API Endpoints
+
+The backend provides the following API endpoints:
+
+### Authentication
+- **POST /auth/register**: Register a new user
+- **POST /auth/login**: Log in an existing user
+- **POST /auth/logout**: Log out the current user
+
+### Timelines
+- **GET /timelines**: Get all timelines
+- **POST /timelines**: Create a new timeline
+- **GET /timelines/<id>**: Get a specific timeline
+- **PUT /timelines/<id>**: Update a timeline
+- **DELETE /timelines/<id>**: Delete a timeline
+
+### Events
+- **GET /events**: Get all events
+- **POST /events**: Create a new event
+- **GET /events/<id>**: Get a specific event
+- **PUT /events/<id>**: Update an event
+- **DELETE /events/<id>**: Delete an event
+
+### File Uploads
+- **POST /upload**: Upload a file
+- **GET /uploads/<filename>**: Serve a file
 
 ## Troubleshooting
 
