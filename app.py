@@ -1515,7 +1515,10 @@ def get_timeline_v3_events(timeline_id):
         return jsonify({'error': f'Failed to get timeline events: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['POST'])
+@jwt_required()
 def create_timeline_v3_event(timeline_id):
+    # Get the current user's ID from the JWT token
+    current_user_id = get_jwt_identity()
     try:
         # Get JSON data from request
         data = request.json
@@ -1652,7 +1655,7 @@ def create_timeline_v3_event(timeline_id):
                 raw_event_date=raw_event_date,  # Store the raw date string
                 type=data['type'],
                 timeline_id=timeline_id,
-                created_by=1,  # Temporary default user ID
+                created_by=current_user_id,  # Temporary default user ID
                 created_at=datetime.now(),  # Current time for created_at
                 is_exact_user_time=is_exact_user_time  # Save the flag
             )
@@ -1665,7 +1668,7 @@ def create_timeline_v3_event(timeline_id):
                 event_date=event_datetime,
                 type=data['type'],
                 timeline_id=timeline_id,
-                created_by=1,  # Temporary default user ID
+                created_by=current_user_id,  # Temporary default user ID
                 created_at=datetime.now(),  # Current time for created_at
                 is_exact_user_time=is_exact_user_time  # Save the flag
             )
@@ -1719,7 +1722,7 @@ def create_timeline_v3_event(timeline_id):
                         tag_timeline = Timeline(
                             name=capitalized_tag_name,
                             description=f"Timeline for #{tag_name}",
-                            created_by=1  # Temporary default user ID
+                            created_by=current_user_id  # Use authenticated user's ID
                         )
                         db.session.add(tag_timeline)
                         db.session.flush()  # Get the timeline ID
