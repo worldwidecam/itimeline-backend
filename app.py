@@ -1364,6 +1364,69 @@ def get_timeline_v3(timeline_id):
         app.logger.error(f'Error fetching timeline: {str(e)}')
         return jsonify({'error': 'Failed to fetch timeline'}), 500
 
+@app.route('/api/timeline-v3/<timeline_id>/add-event/<event_id>', methods=['POST'])
+@jwt_required()
+def add_event_to_timeline(timeline_id, event_id):
+    """
+    Add an existing event to a timeline
+    
+    This endpoint allows adding an event to a timeline after it was created,
+    but only if the timeline already exists and the event is not already in the timeline.
+    """
+    try:
+        # Get current user from JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Get timeline
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({'error': 'Timeline not found'}), 404
+            
+        # Get event
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'error': 'Event not found'}), 404
+            
+        # Check if event is already in this timeline
+        # First check if it's directly in this timeline
+        if int(event.timeline_id) == int(timeline_id):
+            return jsonify({'error': 'Event is already directly in this timeline'}), 400
+            
+        # Then check if it's referenced in this timeline
+        if timeline in event.referenced_in:
+            return jsonify({'error': 'Event is already referenced in this timeline'}), 400
+            
+        # Add the timeline to the event's referenced_in list
+        event.referenced_in.append(timeline)
+        
+        # Create a new tag for this timeline if it doesn't exist
+        timeline_tag_name = timeline.name.lower()
+        existing_tag = Tag.query.filter(db.func.lower(Tag.name) == timeline_tag_name).first()
+        
+        if existing_tag:
+            # If tag exists, check if event already has this tag
+            if existing_tag not in event.tags:
+                event.tags.append(existing_tag)
+        else:
+            # Create new tag and add to event
+            new_tag = Tag(name=timeline_tag_name, timeline_id=timeline.id)
+            db.session.add(new_tag)
+            event.tags.append(new_tag)
+        
+        # Save changes
+        db.session.commit()
+        
+        return jsonify({
+            'message': f'Event successfully added to timeline "{timeline.name}"',
+            'timeline_id': timeline.id,
+            'event_id': event.id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error adding event to timeline: {str(e)}')
+        return jsonify({'error': f'Failed to add event to timeline: {str(e)}'}), 500
+
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['GET'])
 def get_timeline_v3_events(timeline_id):
     try:
