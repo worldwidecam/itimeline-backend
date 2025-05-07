@@ -53,7 +53,7 @@ app.register_blueprint(media_bp)
 
 # Configure CORS to allow frontend to access backend resources
 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-allowed_origins = [frontend_url, 'http://localhost:3000', 'https://i-timeline.com']
+allowed_origins = [frontend_url, 'http://localhost:3000', 'http://localhost:3001', 'https://i-timeline.com']
 CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
 print(f"CORS configured with allowed origins: {allowed_origins}")
 
