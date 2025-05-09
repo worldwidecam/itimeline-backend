@@ -315,6 +315,7 @@ class UserMusic(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), unique=True)
     music_url = db.Column(db.String(500), nullable=True)
     music_platform = db.Column(db.String(20), nullable=True)  # 'youtube', 'soundcloud', or 'spotify'
+    music_public_id = db.Column(db.String(255), nullable=True)  # Cloudinary public ID for deletion
     created_at = db.Column(db.DateTime, default=datetime.now())
     updated_at = db.Column(db.DateTime, default=datetime.now(), onupdate=datetime.now())
 
@@ -906,6 +907,22 @@ def update_music_preferences():
             return jsonify({'error': 'No selected file'}), 400
             
         if file and allowed_audio_file(file.filename):
+            # Check if user already has music and delete it from Cloudinary
+            music_prefs = user.music
+            if music_prefs and music_prefs.music_public_id:
+                app.logger.info(f"Deleting existing music file: {music_prefs.music_public_id}")
+                try:
+                    # Import the delete_file function from cloud_storage
+                    from cloud_storage import delete_file
+                    delete_result = delete_file(music_prefs.music_public_id)
+                    if delete_result['success']:
+                        app.logger.info(f"Successfully deleted old music file: {music_prefs.music_public_id}")
+                    else:
+                        app.logger.warning(f"Failed to delete old music file: {delete_result.get('error', 'Unknown error')}")
+                except Exception as delete_error:
+                    app.logger.error(f"Error deleting old music file: {str(delete_error)}")
+                    # Continue with upload even if deletion fails
+            
             # Generate filename for reference
             filename = secure_filename(f'music_{current_user_id}_{int(time.time())}.{file.filename.rsplit(".", 1)[1].lower()}')
             
@@ -919,6 +936,8 @@ def update_music_preferences():
                 'unique_filename': True
             }
             
+            # Import the upload_file function from cloud_storage
+            from cloud_storage import upload_file as cloudinary_upload_file
             upload_result = cloudinary_upload_file(file, folder="timeline_forum/music", **upload_options)
             
             if not upload_result['success']:
@@ -926,7 +945,6 @@ def update_music_preferences():
                 return jsonify({'error': f"File upload failed: {upload_result['error']}"}), 500
             
             # Update or create music preferences
-            music_prefs = user.music
             if not music_prefs:
                 app.logger.info(f"Creating new music preferences for user {current_user_id}")
                 music_prefs = UserMusic(user_id=user.id)
@@ -954,6 +972,54 @@ def update_music_preferences():
     except Exception as e:
         db.session.rollback()
         app.logger.error(f'Error updating music preferences: {str(e)}', exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/profile/music', methods=['DELETE'])
+@jwt_required()
+def delete_music_preferences():
+    try:
+        current_user_id = int(get_jwt_identity())
+        app.logger.info(f'Deleting music preferences for user {current_user_id}')
+        
+        user = User.query.get(current_user_id)
+        if not user:
+            app.logger.error(f'User {current_user_id} not found')
+            return jsonify({'error': 'User not found'}), 404
+            
+        music_prefs = user.music
+        if not music_prefs or not music_prefs.music_public_id:
+            return jsonify({
+                'success': True,
+                'message': 'No music preferences to delete'
+            })
+        
+        # Delete the file from Cloudinary
+        try:
+            from cloud_storage import delete_file
+            delete_result = delete_file(music_prefs.music_public_id)
+            if delete_result['success']:
+                app.logger.info(f"Successfully deleted music file: {music_prefs.music_public_id}")
+            else:
+                app.logger.warning(f"Failed to delete music file: {delete_result.get('error', 'Unknown error')}")
+        except Exception as delete_error:
+            app.logger.error(f"Error deleting music file: {str(delete_error)}")
+        
+        # Clear the music preferences
+        music_prefs.music_url = None
+        music_prefs.music_platform = None
+        music_prefs.music_public_id = None
+        
+        db.session.commit()
+        app.logger.info('Music preferences deleted successfully')
+        
+        return jsonify({
+            'success': True,
+            'message': 'Music preferences deleted successfully'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error deleting music preferences: {str(e)}')
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/profile/music', methods=['GET'])
