@@ -982,6 +982,32 @@ def get_music_preferences():
         app.logger.error(f'Error getting music preferences: {str(e)}')
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/users/<int:user_id>/music', methods=['GET'])
+@jwt_required()
+def get_user_music(user_id):
+    try:
+        # Get the requested user
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Get the user's music preferences
+        music_prefs = user.music
+        if not music_prefs:
+            return jsonify({
+                'music_url': None,
+                'music_platform': None
+            })
+        
+        return jsonify({
+            'music_url': music_prefs.music_url,
+            'music_platform': music_prefs.music_platform
+        })
+    except Exception as e:
+        app.logger.error(f'Error getting user music preferences: {str(e)}')
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/timelines/<int:timeline_id>', methods=['DELETE'])
 @jwt_required()
 def delete_timeline(timeline_id):
