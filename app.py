@@ -417,7 +417,7 @@ class Event(db.Model):
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text, nullable=True, default='')
     event_date = db.Column(db.DateTime, nullable=False)
-    raw_event_date = db.Column(db.String(100), nullable=True, default='')  # Make it optional with default
+    raw_event_date = db.Column(db.String(100), nullable=True, default='')
     type = db.Column(db.String(50), nullable=False, default='remark')
     url = db.Column(db.String(500), nullable=True)
     url_title = db.Column(db.String(500), nullable=True)
@@ -425,11 +425,13 @@ class Event(db.Model):
     url_image = db.Column(db.String(500), nullable=True)
     media_url = db.Column(db.String(500), nullable=True)
     media_type = db.Column(db.String(50), nullable=True)
+    media_subtype = db.Column(db.String(50), nullable=True)  # New field for media subtypes (media_image, media_audio, media_video)
+    cloudinary_id = db.Column(db.String(255), nullable=True)  # Store Cloudinary public_id for easier deletion
     timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
-    is_exact_user_time = db.Column(db.Boolean, default=False)  # Flag for preserving exact user input time
+    is_exact_user_time = db.Column(db.Boolean, default=False)
     tags = db.relationship('Tag', secondary=event_tags, backref=db.backref('events', lazy='dynamic'))
     referenced_in = db.relationship('Timeline', secondary=event_timeline_refs, backref=db.backref('referenced_events', lazy='dynamic'))
 
@@ -1776,6 +1778,40 @@ def create_timeline_v3_event(timeline_id):
         if 'media_url' in data and data['media_url']:
             new_event.media_url = data['media_url']
             new_event.media_type = data.get('media_type', '')
+            
+            # Handle media subtypes
+            media_subtype = data.get('media_subtype')
+            
+            # If media_subtype is not provided, determine it from media_type or file extension
+            if not media_subtype and data['type'] == 'media':
+                # Check media_type first
+                if new_event.media_type:
+                    if 'image' in new_event.media_type.lower():
+                        media_subtype = 'media_image'
+                    elif 'video' in new_event.media_type.lower():
+                        media_subtype = 'media_video'
+                    elif 'audio' in new_event.media_type.lower():
+                        media_subtype = 'media_audio'
+                
+                # If still no subtype, try to determine from URL
+                if not media_subtype and new_event.media_url:
+                    # Extract file extension from URL
+                    file_ext = new_event.media_url.split('.')[-1].lower() if '.' in new_event.media_url else None
+                    
+                    if file_ext:
+                        if file_ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']:
+                            media_subtype = 'media_image'
+                        elif file_ext in ['mp4', 'webm', 'ogg', 'mov']:
+                            media_subtype = 'media_video'
+                        elif file_ext in ['mp3', 'wav', 'ogg', 'aac']:
+                            media_subtype = 'media_audio'
+            
+            # Set the media_subtype
+            new_event.media_subtype = media_subtype
+            
+            # Store cloudinary_id if available
+            if 'public_id' in data:
+                new_event.cloudinary_id = data['public_id']
         
         # Handle tags
         if 'tags' in data and data['tags']:
@@ -1894,6 +1930,8 @@ def create_timeline_v3_event(timeline_id):
                 'url_image': new_event.url_image,
                 'media_url': new_event.media_url,
                 'media_type': new_event.media_type,
+                'media_subtype': new_event.media_subtype,
+                'cloudinary_id': new_event.cloudinary_id,
                 'created_by': new_event.created_by,
                 'created_at': new_event.created_at.isoformat(),
                 'is_exact_user_time': new_event.is_exact_user_time
@@ -2146,6 +2184,97 @@ def root():
     return jsonify({
         "message": "iTimeline API is running. Use /api/health for detailed status."
     })
+
+@app.route('/api/timeline-v3/<timeline_id>/events/<event_id>', methods=['DELETE'])
+@jwt_required()
+def delete_timeline_v3_event(timeline_id, event_id):
+    """
+    Delete an event from a timeline
+    
+    This endpoint allows deleting an event from a timeline.
+    If the event has media files associated with it, those files will also be deleted from storage.
+    """
+    try:
+        # Get current user
+        current_user_id = get_jwt_identity()
+        
+        # Verify the timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({
+                'success': False,
+                'message': 'Timeline not found'
+            }), 404
+            
+        # Verify the user has permission to modify this timeline
+        if timeline.created_by != current_user_id:
+            return jsonify({
+                'success': False,
+                'message': 'You do not have permission to modify this timeline'
+            }), 403
+            
+        # Find the event
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({
+                'success': False,
+                'message': 'Event not found'
+            }), 404
+            
+        # Check if the event belongs to the timeline
+        if str(event.timeline_id) != str(timeline_id):
+            return jsonify({
+                'success': False,
+                'message': 'Event does not belong to this timeline'
+            }), 400
+            
+        # Check if the event has media files that need to be deleted
+        media_deleted = False
+        if event.media_url and event.type == 'media':
+            # Extract the public_id from the media_url or other fields
+            public_id = None
+            
+            # If the event has a cloudinary_id field, use that
+            if hasattr(event, 'cloudinary_id') and event.cloudinary_id:
+                public_id = event.cloudinary_id
+            else:
+                # Try to extract public_id from URL
+                # Example: https://res.cloudinary.com/dnjwvuxn7/image/upload/v1620123456/timeline_forum/abcdef123456
+                if 'cloudinary.com' in event.media_url or 'res.cloudinary' in event.media_url:
+                    parts = event.media_url.split('/')
+                    if 'upload' in parts:
+                        upload_index = parts.index('upload')
+                        if upload_index + 2 < len(parts):  # Make sure we have enough parts
+                            # Skip the version part (v1234567890)
+                            if parts[upload_index + 1].startswith('v'):
+                                public_id = '/'.join(parts[upload_index + 2:])
+                            else:
+                                public_id = '/'.join(parts[upload_index + 1:])
+            
+            # If we found a public_id, delete the file
+            if public_id:
+                from cloud_storage import delete_file
+                delete_result = delete_file(public_id)
+                media_deleted = delete_result.get('success', False)
+                print(f"Media file deletion result: {delete_result}")
+        
+        # Delete the event from the database
+        db.session.delete(event)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Event deleted successfully',
+            'media_deleted': media_deleted
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error deleting event: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error deleting event: {str(e)}'
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
