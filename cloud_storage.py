@@ -68,7 +68,10 @@ def upload_file(file, folder="timeline_forum", **options):
         # For audio files, add specific optimizations
         if is_audio:
             default_options.update({
-                'resource_type': 'raw',  # Use raw for audio files to prevent transcoding issues
+                'resource_type': 'auto',  # Let Cloudinary automatically detect the resource type
+                'use_filename': True,     # Use the original filename
+                'unique_filename': True,  # Ensure the filename is unique
+                'folder': 'timeline_forum/music'  # Use the same folder as the profile music uploader
             })
             
         # Merge default options with provided options

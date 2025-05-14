@@ -47,8 +47,14 @@ app.config.update(
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
+# Import blueprints
+from routes.upload import upload_bp
+from routes.cloudinary import cloudinary_bp
+from routes.media import media_bp
+
 # Register blueprints
 app.register_blueprint(upload_bp)
+app.register_blueprint(cloudinary_bp)
 app.register_blueprint(media_bp)
 
 # Configure CORS to allow frontend to access backend resources

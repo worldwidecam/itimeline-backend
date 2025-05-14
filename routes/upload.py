@@ -208,9 +208,25 @@ def upload_media():
             # This is necessary because we need to reset the file pointer
             file.seek(0)  # Reset file pointer to beginning
             
+            # Prepare upload options based on media type
+            upload_options = {}
+            
+            # If it's an audio file, use the same approach as the profile music uploader
+            if media_category == 'audio':
+                print(f"Audio file detected, using specialized audio upload settings")
+                upload_options = {
+                    'resource_type': 'auto',
+                    'use_filename': True,
+                    'unique_filename': True
+                }
+                # Don't specify folder here as it's now handled in cloud_storage.py for audio files
+            else:
+                # For non-audio files, use the standard approach
+                upload_options['folder'] = "timeline_media"
+            
             # Upload to Cloudinary
-            print(f"Attempting to upload to Cloudinary first")
-            upload_result = cloudinary_upload_file(file, folder="timeline_media")
+            print(f"Attempting to upload to Cloudinary first with options: {upload_options}")
+            upload_result = cloudinary_upload_file(file, **upload_options)
             
             if upload_result.get('success'):
                 print("Cloudinary upload successful:")
