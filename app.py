@@ -347,6 +347,7 @@ class Timeline(db.Model):
     description = db.Column(db.Text)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     created_at = db.Column(db.DateTime, default=datetime.now())
+    timeline_type = db.Column(db.String(50), default='hashtag', nullable=False)  # Added timeline_type field
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1394,7 +1395,8 @@ def get_timelines_v3():
             'id': timeline.id,
             'name': timeline.name,
             'description': timeline.description,
-            'created_at': timeline.created_at.isoformat()
+            'created_at': timeline.created_at.isoformat(),
+            'timeline_type': timeline.timeline_type
         } for timeline in timelines])
         
     except Exception as e:
@@ -1428,7 +1430,8 @@ def create_timeline_v3():
         new_timeline = Timeline(
             name=data['name'],
             description=data.get('description', ''),
-            created_by=current_user_id
+            created_by=current_user_id,
+            timeline_type=data.get('timeline_type', 'hashtag')  # Default to 'hashtag' if not provided
         )
         
         db.session.add(new_timeline)
@@ -1458,7 +1461,8 @@ def get_timeline_v3(timeline_id):
             'name': timeline.name,
             'description': timeline.description,
             'created_by': timeline.created_by,
-            'created_at': timeline.created_at.isoformat()
+            'created_at': timeline.created_at.isoformat(),
+            'timeline_type': timeline.timeline_type
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline: {str(e)}')
