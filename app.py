@@ -1329,7 +1329,8 @@ def validate_token():
             'user': {
                 'id': user.id,
                 'email': user.email,
-                'username': user.username
+                'username': user.username,
+                'avatar_url': user.avatar_url  # Include the avatar URL in the response
             }
         }), 200
     except Exception as e:
