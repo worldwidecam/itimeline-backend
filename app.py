@@ -348,6 +348,65 @@ class Timeline(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     created_at = db.Column(db.DateTime, default=datetime.now())
     timeline_type = db.Column(db.String(50), default='hashtag', nullable=False)  # Added timeline_type field
+    visibility = db.Column(db.String(20), default='public', nullable=False)  # public or private
+    privacy_changed_at = db.Column(db.DateTime, nullable=True)  # For tracking cooldown period
+    members = db.relationship('TimelineMember', backref='timeline', lazy=True)
+    
+    def is_community(self):
+        return self.timeline_type == 'community'
+        
+    def is_private(self):
+        return self.visibility == 'private'
+        
+    def get_formatted_name(self):
+        """Return the formatted name based on timeline type"""
+        if self.is_community():
+            return f"i-{self.name}"
+        return f"#{self.name}"
+
+
+class TimelineMember(db.Model):
+    __tablename__ = 'timeline_member'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member
+    joined_at = db.Column(db.DateTime, default=datetime.now)
+    invited_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    
+    # Unique constraint to prevent duplicate memberships
+    __table_args__ = (
+        db.UniqueConstraint('timeline_id', 'user_id', name='unique_timeline_membership'),
+    )
+    
+    def is_admin(self):
+        return self.role == 'admin'
+        
+    def is_moderator(self):
+        return self.role == 'moderator' or self.role == 'admin'  # Admins have moderator powers
+
+
+class EventTimelineAssociation(db.Model):
+    __tablename__ = 'event_timeline_association'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    shared_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    shared_at = db.Column(db.DateTime, default=datetime.now)
+    source_timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=True)
+    
+    # Relationships
+    event = db.relationship('Event', foreign_keys=[event_id])
+    timeline = db.relationship('Timeline', foreign_keys=[timeline_id])
+    source_timeline = db.relationship('Timeline', foreign_keys=[source_timeline_id])
+    shared_by_user = db.relationship('User', foreign_keys=[shared_by])
+    
+    # Unique constraint to prevent duplicate shares
+    __table_args__ = (
+        db.UniqueConstraint('event_id', 'timeline_id', name='unique_event_timeline_association'),
+    )
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -441,6 +500,12 @@ class Event(db.Model):
     is_exact_user_time = db.Column(db.Boolean, default=False)
     tags = db.relationship('Tag', secondary=event_tags, backref=db.backref('events', lazy='dynamic'))
     referenced_in = db.relationship('Timeline', secondary=event_timeline_refs, backref=db.backref('referenced_events', lazy='dynamic'))
+    
+    # Community timeline associations
+    timeline_associations = db.relationship('EventTimelineAssociation', 
+                                          foreign_keys=[EventTimelineAssociation.event_id],
+                                          backref=db.backref('associated_event', lazy=True),
+                                          lazy='dynamic')
 
     def __repr__(self):
         return f'<Event {self.title}>'

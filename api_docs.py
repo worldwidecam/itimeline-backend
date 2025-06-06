@@ -44,10 +44,48 @@ class TimelineSchema(Schema):
     description = fields.Str(description="Timeline description", allow_none=True)
     created_by = fields.Int(description="User ID of creator")
     created_at = fields.DateTime(description="Creation timestamp")
+    timeline_type = fields.Str(description="Timeline type (hashtag, community)", default="hashtag")
+    visibility = fields.Str(description="Timeline visibility (public, private)", default="public")
+    formatted_name = fields.Method("get_formatted_name", description="Formatted name with prefix (# or i-)")
+    member_count = fields.Int(description="Number of members", dump_only=True)
+    
+    def get_formatted_name(self, obj):
+        """Return the formatted name based on timeline type"""
+        if hasattr(obj, 'get_formatted_name'):
+            return obj.get_formatted_name()
+        if hasattr(obj, 'timeline_type') and obj.timeline_type == 'community':
+            return f"i-{obj.name}"
+        return f"#{obj.name}"
 
 class TimelineCreateSchema(Schema):
     name = fields.Str(required=True, description="Timeline name")
     description = fields.Str(description="Timeline description", allow_none=True)
+    timeline_type = fields.Str(description="Timeline type (hashtag, community)", default="hashtag")
+    visibility = fields.Str(description="Timeline visibility (public, private)", default="public")
+
+class TimelineMemberSchema(Schema):
+    id = fields.Int(description="Member ID")
+    timeline_id = fields.Int(description="Timeline ID")
+    user_id = fields.Int(description="User ID")
+    role = fields.Str(description="Member role (admin, moderator, member)")
+    joined_at = fields.DateTime(description="Join timestamp")
+    invited_by = fields.Int(description="User ID of inviter", allow_none=True)
+    user = fields.Nested("UserSchema", exclude=("email",), dump_only=True)
+
+class TimelineMemberCreateSchema(Schema):
+    user_id = fields.Int(required=True, description="User ID to add as member")
+    role = fields.Str(description="Member role (admin, moderator, member)", default="member")
+
+class EventTimelineAssociationSchema(Schema):
+    id = fields.Int(description="Association ID")
+    event_id = fields.Int(description="Event ID")
+    timeline_id = fields.Int(description="Timeline ID")
+    shared_by = fields.Int(description="User ID who shared the event")
+    shared_at = fields.DateTime(description="Timestamp when shared")
+    source_timeline_id = fields.Int(description="Source timeline ID", allow_none=True)
+    shared_by_user = fields.Nested("UserSchema", exclude=("email",), dump_only=True)
+    timeline = fields.Nested("TimelineSchema", exclude=("description",), dump_only=True)
+    source_timeline = fields.Nested("TimelineSchema", exclude=("description",), dump_only=True, allow_none=True)
 
 class EventSchema(Schema):
     id = fields.Int(description="Event ID")
