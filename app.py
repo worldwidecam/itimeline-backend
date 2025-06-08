@@ -1518,8 +1518,11 @@ def create_timeline_v3():
         db.session.rollback()
         return jsonify({'error': error_msg}), 500
 
-@app.route('/api/timeline-v3/<int:timeline_id>', methods=['GET'])
+@app.route('/api/timeline-v3/<timeline_id>', methods=['GET'])
 def get_timeline_v3(timeline_id):
+    # Convert timeline_id to integer if it's numeric
+    if isinstance(timeline_id, str) and timeline_id.isdigit():
+        timeline_id = int(timeline_id)
     try:
         timeline = Timeline.query.get_or_404(timeline_id)
         return jsonify({
@@ -1599,6 +1602,10 @@ def add_event_to_timeline(timeline_id, event_id):
 
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['GET'])
 def get_timeline_v3_events(timeline_id):
+    # Convert timeline_id to integer if it's numeric
+    if isinstance(timeline_id, str) and timeline_id.isdigit():
+        timeline_id = int(timeline_id)
+        
     try:
         # Get timeline
         timeline = Timeline.query.get(timeline_id)
@@ -2087,7 +2094,9 @@ def get_timeline_v3_by_name(timeline_name):
             'name': timeline.name,
             'description': timeline.description,
             'created_by': timeline.created_by,
-            'created_at': timeline.created_at.isoformat()
+            'created_at': timeline.created_at.isoformat(),
+            'timeline_type': timeline.timeline_type,
+            'visibility': getattr(timeline, 'visibility', 'public')
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline by name: {str(e)}')
