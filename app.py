@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Enable CORS for development
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "https://i-timeline.com"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "Accept"]
+    }
+})
+
 # Basic configurations
 app.config.update(
     SQLALCHEMY_DATABASE_URI='sqlite:///timeline_forum.db',  # Temporarily using SQLite for local testing
@@ -53,9 +62,13 @@ from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
 
 # Register blueprints
-app.register_blueprint(upload_bp)
-app.register_blueprint(cloudinary_bp)
-app.register_blueprint(media_bp)
+app.register_blueprint(upload_bp, url_prefix='/api')
+app.register_blueprint(media_bp, url_prefix='/api')
+app.register_blueprint(cloudinary_bp, url_prefix='/api')
+
+# Import and register community blueprint after models are defined
+from routes.community import community_bp
+app.register_blueprint(community_bp, url_prefix='/api/v1')
 
 # Configure CORS to allow frontend to access backend resources
 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
@@ -374,6 +387,10 @@ class TimelineMember(db.Model):
     role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member
     joined_at = db.Column(db.DateTime, default=datetime.now)
     invited_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    
+    # Add relationship to User model to load user data
+    user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('memberships', lazy=True))
+    inviter = db.relationship('User', foreign_keys=[invited_by], backref=db.backref('invited_members', lazy=True))
     
     # Unique constraint to prevent duplicate memberships
     __table_args__ = (

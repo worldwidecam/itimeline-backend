@@ -14,8 +14,10 @@ from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from marshmallow import ValidationError
 
-from app import app, db
-from app import Timeline, TimelineMember, Event, EventTimelineAssociation, User
+# Create blueprint first, before any circular imports can happen
+community_bp = Blueprint('community', __name__)
+
+# Import schemas only - models will be imported inside route functions
 from api_docs import (
     TimelineSchema, TimelineMemberSchema, TimelineMemberCreateSchema,
     EventTimelineAssociationSchema, EventSchema
@@ -50,6 +52,9 @@ def check_timeline_access(timeline_id, required_role=None):
     Returns:
         tuple: (timeline, membership, has_access)
     """
+    # Import models here to avoid circular imports
+    from app import Timeline, TimelineMember
+    
     user_id = get_user_id()
     timeline = Timeline.query.get_or_404(timeline_id)
     
@@ -132,13 +137,77 @@ def create_community_timeline():
 @jwt_required()
 def get_timeline_members(timeline_id):
     """Get all members of a timeline"""
+    # Import models here to avoid circular imports
+    from app import db, TimelineMember, User, Timeline
+    
     timeline, membership, has_access = check_timeline_access(timeline_id)
     
     if not has_access:
         return jsonify({"error": "Access denied"}), 403
     
-    members = TimelineMember.query.filter_by(timeline_id=timeline_id).all()
+    # Import joinedload for eager loading relationships
+    from sqlalchemy.orm import joinedload
+    
+    # Get all members from the TimelineMember table with eager loading of user relationship
+    members = TimelineMember.query.options(joinedload(TimelineMember.user)).filter_by(timeline_id=timeline_id).all()
     result = members_schema.dump(members)
+    
+    # Debug: Print what we're getting from the database
+    print(f"Found {len(members)} members in database")
+    for member in members:
+        print(f"Member: {member.user_id}, Role: {member.role}, User loaded: {member.user is not None}")
+        if member.user:
+            print(f"  Username: {member.user.username}")
+    
+    # Check if Brahdyssey (user ID 1) is already in the members list
+    brahdyssey_in_members = any(m['user_id'] == 1 for m in result)
+    
+    # If Brahdyssey is not in the members list, add them with SiteOwner role
+    # SiteOwner role is ONLY for Brahdyssey (user ID 1)
+    if not brahdyssey_in_members:
+        # Get Brahdyssey's user information
+        brahdyssey = User.query.get(1)
+        if brahdyssey:
+            # Create a temporary TimelineMember object for Brahdyssey
+            brahdyssey_member = TimelineMember(
+                timeline_id=timeline_id,
+                user_id=1,
+                role='SiteOwner',  # SiteOwner role is ONLY for Brahdyssey
+                joined_at=timeline.created_at
+            )
+            # Add Brahdyssey to the result
+            brahdyssey_result = member_schema.dump(brahdyssey_member)
+            result.append(brahdyssey_result)
+            print(f"Added SiteOwner {brahdyssey.username} (ID: {brahdyssey.id}) to members list")
+    
+    # Normalize roles in the result (ensure consistent capitalization)
+    for member in result:
+        if member['role'].lower() == 'admin':
+            member['role'] = 'Admin'
+        elif member['role'].lower() == 'moderator':
+            member['role'] = 'Moderator'
+        elif member['role'].lower() == 'member':
+            member['role'] = 'Member'
+    
+    # Check if the creator is already in the members list
+    creator_in_members = any(m['user_id'] == timeline.created_by for m in result)
+    
+    # If the creator is not in the members list and is not Brahdyssey, add them with Admin role
+    if not creator_in_members and timeline.created_by != 1:
+        # Get the creator's user information
+        creator = User.query.get(timeline.created_by)
+        if creator:
+            # Create a temporary TimelineMember object for the creator
+            creator_member = TimelineMember(
+                timeline_id=timeline_id,
+                user_id=creator.id,
+                role='Admin',  # Timeline creators get Admin role
+                joined_at=timeline.created_at  # They joined when they created it
+            )
+            # Add the creator to the result
+            creator_result = member_schema.dump(creator_member)
+            result.append(creator_result)
+            print(f"Added creator {creator.username} (ID: {creator.id}) to members list with Admin role")
     
     return jsonify(result), 200
 
@@ -458,5 +527,5 @@ def get_shared_events(timeline_id):
     result = associations_schema.dump(associations)
     return jsonify(result), 200
 
-# Register blueprint with app
-app.register_blueprint(community_bp, url_prefix='/api/v1')
+# Blueprint is registered in app.py
+# Do not register here to avoid circular imports
