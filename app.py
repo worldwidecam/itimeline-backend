@@ -384,7 +384,7 @@ class TimelineMember(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member
+    role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member, SiteOwner
     joined_at = db.Column(db.DateTime, default=datetime.now)
     invited_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     
@@ -398,10 +398,13 @@ class TimelineMember(db.Model):
     )
     
     def is_admin(self):
-        return self.role == 'admin'
+        return self.role == 'admin' or self.role == 'SiteOwner'
         
     def is_moderator(self):
-        return self.role == 'moderator' or self.role == 'admin'  # Admins have moderator powers
+        return self.role == 'moderator' or self.role == 'admin' or self.role == 'SiteOwner'  # Admins and SiteOwners have moderator powers
+        
+    def is_site_owner(self):
+        return self.role == 'SiteOwner'  # SiteOwner role is reserved for user ID 1
 
 
 class EventTimelineAssociation(db.Model):

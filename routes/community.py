@@ -58,6 +58,22 @@ def check_timeline_access(timeline_id, required_role=None):
     user_id = get_user_id()
     timeline = Timeline.query.get_or_404(timeline_id)
     
+    # SiteOwner (user ID 1) always has access to any timeline
+    if user_id == 1:
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id, user_id=user_id
+        ).first()
+        
+        # If SiteOwner is not yet a member, create a virtual membership with SiteOwner role
+        if not membership:
+            membership = TimelineMember(
+                timeline_id=timeline_id,
+                user_id=1,
+                role='SiteOwner'
+            )
+        
+        return timeline, membership, True
+    
     # If public timeline, anyone can view
     if timeline.visibility == 'public' and required_role is None:
         membership = TimelineMember.query.filter_by(
@@ -74,10 +90,10 @@ def check_timeline_access(timeline_id, required_role=None):
         return timeline, None, False
     
     # Check role if required
-    if required_role == 'admin' and membership.role != 'admin':
+    if required_role == 'admin' and membership.role != 'admin' and membership.role != 'SiteOwner':
         return timeline, membership, False
     
-    if required_role == 'moderator' and not membership.is_moderator():
+    if required_role == 'moderator' and not membership.is_moderator() and membership.role != 'SiteOwner':
         return timeline, membership, False
     
     return timeline, membership, True
@@ -281,6 +297,10 @@ def remove_timeline_member(timeline_id, user_id):
         timeline_id=timeline_id, user_id=user_id
     ).first_or_404()
     
+    # Prevent removing the SiteOwner (user ID 1)
+    if user_id == 1 or member.role == 'SiteOwner':
+        return jsonify({"error": "Cannot remove the site owner from any timeline"}), 403
+    
     # Check permissions
     if member.role == 'admin' and membership.role != 'admin':
         return jsonify({"error": "Only admins can remove admins"}), 403
@@ -315,13 +335,27 @@ def update_member_role(timeline_id, user_id):
         return jsonify({"error": "Role not provided"}), 400
     
     new_role = data['role']
-    if new_role not in ['admin', 'moderator', 'member']:
+    # Include SiteOwner as a valid role, but with restrictions
+    if new_role not in ['SiteOwner', 'admin', 'moderator', 'member']:
         return jsonify({"error": "Invalid role"}), 400
+        
+    # Only user ID 1 can be assigned the SiteOwner role
+    if new_role == 'SiteOwner' and user_id != 1:
+        return jsonify({"error": "Only the site owner (user ID 1) can have the SiteOwner role"}), 403
+        
+    # Prevent changing the role of user ID 1 (SiteOwner)
+    current_user_id = get_user_id()
+    if user_id == 1 and current_user_id != 1:
+        return jsonify({"error": "Cannot change the role of the site owner"}), 403
     
     # Get the member to update
     member = TimelineMember.query.filter_by(
         timeline_id=timeline_id, user_id=user_id
     ).first_or_404()
+    
+    # Prevent downgrading SiteOwner role
+    if member.role == 'SiteOwner' and new_role != 'SiteOwner' and user_id == 1:
+        return jsonify({"error": "Cannot downgrade the site owner's role"}), 403
     
     # Update role
     member.role = new_role
