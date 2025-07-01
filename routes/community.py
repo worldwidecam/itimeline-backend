@@ -408,13 +408,9 @@ def update_timeline_visibility(timeline_id):
 @community_bp.route('/timelines/<int:timeline_id>/access-requests', methods=['POST'])
 @jwt_required()
 def request_timeline_access(timeline_id):
-    """Request access to a private timeline"""
+    """Request access to a timeline - handles both public and private timelines"""
     user_id = get_user_id()
     timeline = Timeline.query.get_or_404(timeline_id)
-    
-    # Check if timeline is private
-    if timeline.visibility != 'private':
-        return jsonify({"error": "Timeline is not private"}), 400
     
     # Check if user is already a member
     existing = TimelineMember.query.filter_by(
@@ -424,20 +420,54 @@ def request_timeline_access(timeline_id):
     if existing:
         return jsonify({"error": "You are already a member"}), 400
     
-    # Create access request (as a pending member)
-    new_request = TimelineMember(
+    # For public timelines, auto-accept the user as a member
+    # For private timelines, create a pending request
+    role = 'member' if timeline.visibility != 'private' else 'pending'
+    
+    # Create the membership record
+    new_member = TimelineMember(
         timeline_id=timeline_id,
         user_id=user_id,
-        role='pending',
+        role=role,
         joined_at=datetime.now()
     )
     
-    db.session.add(new_request)
+    db.session.add(new_member)
     db.session.commit()
     
-    # TODO: Add notification for admins/moderators
+    # For private timelines, notify admins (future enhancement)
+    if timeline.visibility == 'private':
+        # TODO: Add notification for admins/moderators
+        message = "Access request submitted"
+    else:
+        message = "You have joined the community timeline"
     
-    return jsonify({"message": "Access request submitted"}), 201
+    return jsonify({"message": message, "role": role}), 201
+
+@community_bp.route('/timelines/<int:timeline_id>/membership-status', methods=['GET'])
+@jwt_required()
+def check_membership_status(timeline_id):
+    """Check if the current user is a member of the timeline and their role"""
+    user_id = get_user_id()
+    timeline = Timeline.query.get_or_404(timeline_id)
+    
+    # Check membership
+    membership = TimelineMember.query.filter_by(
+        timeline_id=timeline_id, user_id=user_id
+    ).first()
+    
+    result = {
+        "is_member": False,
+        "role": None,
+        "timeline_visibility": timeline.visibility
+    }
+    
+    if membership:
+        result["is_member"] = membership.role != 'pending'
+        result["role"] = membership.role
+        result["joined_at"] = membership.joined_at.isoformat() if membership.joined_at else None
+    
+    return jsonify(result), 200
 
 @community_bp.route('/timelines/<int:timeline_id>/access-requests/<int:user_id>', methods=['PUT'])
 @jwt_required()

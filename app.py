@@ -19,8 +19,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
-from routes.upload import upload_bp
-from routes.media import media_bp
 import sqlalchemy
 from sqlalchemy import text
 
@@ -30,14 +28,17 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Enable CORS for development
+# Configure CORS to allow frontend to access backend resources - MOVED BEFORE BLUEPRINT REGISTRATION
+frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+allowed_origins = [frontend_url, 'http://localhost:3000', 'http://localhost:3001', 'https://i-timeline.com']
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "https://i-timeline.com"],
+        "origins": allowed_origins,
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization", "Accept"]
     }
-})
+}, supports_credentials=True)
+print(f"CORS configured with allowed origins: {allowed_origins}")
 
 # Basic configurations
 app.config.update(
@@ -60,21 +61,13 @@ jwt = JWTManager(app)
 from routes.upload import upload_bp
 from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
+from routes.community import community_bp
 
 # Register blueprints
 app.register_blueprint(upload_bp, url_prefix='/api')
 app.register_blueprint(media_bp, url_prefix='/api')
 app.register_blueprint(cloudinary_bp, url_prefix='/api')
-
-# Import and register community blueprint after models are defined
-from routes.community import community_bp
 app.register_blueprint(community_bp, url_prefix='/api/v1')
-
-# Configure CORS to allow frontend to access backend resources
-frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-allowed_origins = [frontend_url, 'http://localhost:3000', 'http://localhost:3001', 'https://i-timeline.com']
-CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
-print(f"CORS configured with allowed origins: {allowed_origins}")
 
 # Ensure the database exists
 with app.app_context():
