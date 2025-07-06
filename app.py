@@ -21,6 +21,8 @@ from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
 import sqlalchemy
 from sqlalchemy import text
+import json
+from models import UserPassport
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -62,12 +64,14 @@ from routes.upload import upload_bp
 from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
 from routes.community import community_bp
+from routes.passport import passport_bp
 
 # Register blueprints
 app.register_blueprint(upload_bp, url_prefix='/api')
 app.register_blueprint(media_bp, url_prefix='/api')
 app.register_blueprint(cloudinary_bp, url_prefix='/api')
 app.register_blueprint(community_bp, url_prefix='/api/v1')
+app.register_blueprint(passport_bp, url_prefix='/api/v1')
 
 # Ensure the database exists
 with app.app_context():

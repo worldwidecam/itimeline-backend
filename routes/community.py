@@ -23,9 +23,6 @@ from api_docs import (
     EventTimelineAssociationSchema, EventSchema
 )
 
-# Create blueprint
-community_bp = Blueprint('community', __name__)
-
 # Schemas
 timeline_schema = TimelineSchema()
 timelines_schema = TimelineSchema(many=True)
@@ -532,6 +529,60 @@ def check_membership_status(timeline_id):
         result["is_member"] = True
     
     print(f"DEBUG: Final membership result: {result}")
+    return jsonify(result), 200
+
+@community_bp.route('/user/memberships', methods=['GET'])
+@jwt_required()
+def get_user_memberships():
+    """Get all timeline memberships for the current user"""
+    user_id = get_user_id()
+    print(f"DEBUG: Fetching all memberships for user {user_id}")
+    
+    # Get all timelines where the user is a member
+    memberships = TimelineMember.query.filter_by(user_id=user_id).all()
+    
+    # Get all timelines created by the user (they are implicitly members)
+    created_timelines = Timeline.query.filter_by(created_by=user_id).all()
+    created_timeline_ids = set(t.id for t in created_timelines)
+    
+    # Prepare the result
+    result = []
+    
+    # Add memberships from the timeline_member table
+    for membership in memberships:
+        if membership.is_active_member:
+            result.append({
+                'timeline_id': membership.timeline_id,
+                'role': membership.role,
+                'joined_at': membership.joined_at.isoformat() if membership.joined_at else None
+            })
+    
+    # Add timelines created by the user (if not already in the list)
+    for timeline in created_timelines:
+        # Check if this timeline is already in the result
+        if not any(m['timeline_id'] == timeline.id for m in result):
+            result.append({
+                'timeline_id': timeline.id,
+                'role': 'admin',  # Creator is always admin
+                'joined_at': timeline.created_at.isoformat() if timeline.created_at else None
+            })
+    
+    # Special case: SiteOwner (user ID 1) has access to all timelines
+    if user_id == 1:
+        print("DEBUG: SiteOwner detected, adding access to all timelines")
+        # Get all timelines the SiteOwner doesn't already have explicit membership for
+        all_timelines = Timeline.query.all()
+        existing_timeline_ids = set(m['timeline_id'] for m in result)
+        
+        for timeline in all_timelines:
+            if timeline.id not in existing_timeline_ids:
+                result.append({
+                    'timeline_id': timeline.id,
+                    'role': 'SiteOwner',
+                    'joined_at': None
+                })
+    
+    print(f"DEBUG: Found {len(result)} memberships for user {user_id}")
     return jsonify(result), 200
 
 @community_bp.route('/timelines/<int:timeline_id>/members/debug', methods=['GET'])

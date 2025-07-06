@@ -1,0 +1,181 @@
+"""
+User Passport API routes for managing persistent membership data across devices.
+"""
+
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required, get_jwt_identity
+import json
+from datetime import datetime
+import sqlite3
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create blueprint
+passport_bp = Blueprint('passport', __name__)
+
+@passport_bp.route('/api/v1/user/passport', methods=['GET'])
+@jwt_required()
+def get_user_passport():
+    """
+    Get the current user's passport containing all their timeline memberships.
+    This is fetched whenever a user logs in from any device.
+    """
+    try:
+        # Get current user ID from JWT
+        current_user_id = get_jwt_identity()
+        
+        # Connect to database
+        conn = sqlite3.connect('timeline_forum.db')
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Check if user has a passport
+        cursor.execute(
+            'SELECT * FROM user_passport WHERE user_id = ?',
+            (current_user_id,)
+        )
+        passport = cursor.fetchone()
+        
+        if not passport:
+            # Create a new passport if one doesn't exist
+            cursor.execute(
+                'INSERT INTO user_passport (user_id, memberships_json, last_updated) VALUES (?, ?, ?)',
+                (current_user_id, '[]', datetime.now())
+            )
+            conn.commit()
+            
+            # Return empty memberships
+            return jsonify({
+                'memberships': [],
+                'last_updated': datetime.now().isoformat()
+            }), 200
+        
+        # Parse memberships from JSON
+        try:
+            memberships = json.loads(passport['memberships_json'])
+        except json.JSONDecodeError:
+            memberships = []
+        
+        # Return passport data
+        return jsonify({
+            'memberships': memberships,
+            'last_updated': passport['last_updated']
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user passport: {str(e)}")
+        return jsonify({'error': 'Failed to get user passport'}), 500
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+@passport_bp.route('/api/v1/user/passport/sync', methods=['POST'])
+@jwt_required()
+def sync_user_passport():
+    """
+    Sync the user's passport with the latest membership data.
+    This is called after any membership changes (join/leave community).
+    """
+    try:
+        # Get current user ID from JWT
+        current_user_id = get_jwt_identity()
+        
+        # Connect to database
+        conn = sqlite3.connect('timeline_forum.db')
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Get all timeline memberships for the user
+        cursor.execute('''
+            SELECT tm.timeline_id, tm.role, tm.is_active_member, tm.joined_at,
+                   t.name as timeline_name, t.visibility, t.timeline_type
+            FROM timeline_member tm
+            JOIN timeline t ON tm.timeline_id = t.id
+            WHERE tm.user_id = ? AND tm.is_active_member = 1
+        ''', (current_user_id,))
+        
+        memberships = []
+        for row in cursor.fetchall():
+            memberships.append({
+                'timeline_id': row['timeline_id'],
+                'role': row['role'],
+                'is_active_member': bool(row['is_active_member']),
+                'joined_at': row['joined_at'],
+                'timeline_name': row['timeline_name'],
+                'visibility': row['visibility'],
+                'timeline_type': row['timeline_type']
+            })
+        
+        # Also add timelines created by the user (they're implicitly admins)
+        cursor.execute('''
+            SELECT id as timeline_id, name as timeline_name, visibility, timeline_type, created_at
+            FROM timeline
+            WHERE created_by = ? AND id NOT IN (
+                SELECT timeline_id FROM timeline_member WHERE user_id = ?
+            )
+        ''', (current_user_id, current_user_id))
+        
+        for row in cursor.fetchall():
+            memberships.append({
+                'timeline_id': row['timeline_id'],
+                'role': 'admin',  # Creator is always admin
+                'is_active_member': True,
+                'joined_at': row['created_at'],
+                'timeline_name': row['timeline_name'],
+                'visibility': row['visibility'],
+                'timeline_type': row['timeline_type'],
+                'is_creator': True
+            })
+        
+        # For SiteOwner (user ID 1), add access to all timelines
+        if int(current_user_id) == 1:
+            cursor.execute('''
+                SELECT id as timeline_id, name as timeline_name, visibility, timeline_type, created_at
+                FROM timeline
+                WHERE id NOT IN (
+                    SELECT timeline_id FROM timeline_member WHERE user_id = 1
+                )
+            ''')
+            
+            for row in cursor.fetchall():
+                memberships.append({
+                    'timeline_id': row['timeline_id'],
+                    'role': 'SiteOwner',
+                    'is_active_member': True,
+                    'joined_at': row['created_at'],
+                    'timeline_name': row['timeline_name'],
+                    'visibility': row['visibility'],
+                    'timeline_type': row['timeline_type'],
+                    'is_site_owner': True
+                })
+        
+        # Update the user's passport with the latest membership data
+        cursor.execute(
+            'UPDATE user_passport SET memberships_json = ?, last_updated = ? WHERE user_id = ?',
+            (json.dumps(memberships), datetime.now().isoformat(), current_user_id)
+        )
+        
+        # If no passport exists, create one
+        if cursor.rowcount == 0:
+            cursor.execute(
+                'INSERT INTO user_passport (user_id, memberships_json, last_updated) VALUES (?, ?, ?)',
+                (current_user_id, json.dumps(memberships), datetime.now().isoformat())
+            )
+        
+        conn.commit()
+        
+        return jsonify({
+            'memberships': memberships,
+            'last_updated': datetime.now().isoformat(),
+            'message': 'Passport synced successfully'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error syncing user passport: {str(e)}")
+        return jsonify({'error': 'Failed to sync user passport'}), 500
+    finally:
+        if 'conn' in locals():
+            conn.close()

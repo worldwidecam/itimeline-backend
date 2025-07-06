@@ -9,6 +9,17 @@ Backend server for the iTimeline application, a modern web application for creat
 - File uploads with Cloudinary integration
 - Database management with SQLAlchemy
 - CORS support for cross-domain requests
+- User-specific membership persistence with Passport system
+
+### User Passport System
+- **Cross-Device Membership Persistence**: Maintains consistent timeline membership status across multiple devices and sessions
+- **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table
+- **User-Specific Caching**: Frontend caches passport data with user-specific localStorage keys
+- **Automatic Synchronization**: Passport syncs with backend after membership changes
+- **Special Role Recognition**: Automatically recognizes timeline creators and site owners as members
+- **API Endpoints**:
+  - `GET /api/v1/user/passport`: Fetches the user's complete membership passport
+  - `POST /api/v1/user/passport/sync`: Synchronizes the passport with the latest membership data
 
 ### Date and Time Handling
 - **Raw Event Date Storage**: Stores event dates in the `raw_event_date` column as strings in the format `MM.DD.YYYY.HH.MM.AMPM`
