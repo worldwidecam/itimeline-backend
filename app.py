@@ -35,7 +35,7 @@ CORS(app, resources={
     r"/*": {
         "origins": allowed_origins,
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "Accept"]
+        "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"]
     }
 }, supports_credentials=True)
 print(f"CORS configured with allowed origins: {allowed_origins}")
@@ -378,6 +378,7 @@ class TimelineMember(db.Model):
     timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member, SiteOwner
+    is_active_member = db.Column(db.Boolean, default=True)  # True for active members, False for pending
     joined_at = db.Column(db.DateTime, default=datetime.now)
     invited_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     
@@ -1510,10 +1511,25 @@ def create_timeline_v3():
             name=data['name'],
             description=data.get('description', ''),
             created_by=current_user_id,
-            timeline_type=data.get('timeline_type', 'hashtag')  # Default to 'hashtag' if not provided
+            timeline_type=data.get('timeline_type', 'hashtag'),  # Default to 'hashtag' if not provided
+            visibility=data.get('visibility', 'public')  # Default to 'public' if not provided
         )
         
         db.session.add(new_timeline)
+        db.session.flush()  # Get the timeline ID before committing
+        
+        # If this is a community timeline, add the creator as an admin
+        if data.get('timeline_type') == 'community':
+            logger.info(f"Adding creator as admin for community timeline: {new_timeline.id}")
+            admin = TimelineMember(
+                timeline_id=new_timeline.id,
+                user_id=current_user_id,
+                role='admin',
+                is_active_member=True,  # Always active for creator
+                joined_at=datetime.now()
+            )
+            db.session.add(admin)
+        
         db.session.commit()
         
         logger.info(f"Timeline created successfully: {new_timeline.id}")
@@ -1522,7 +1538,9 @@ def create_timeline_v3():
             'id': new_timeline.id,
             'name': new_timeline.name,
             'description': new_timeline.description,
-            'created_at': new_timeline.created_at.isoformat()
+            'created_at': new_timeline.created_at.isoformat(),
+            'timeline_type': new_timeline.timeline_type,
+            'visibility': new_timeline.visibility
         }), 201
         
     except Exception as e:
