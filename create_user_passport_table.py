@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
+ONE-TIME-USE SCRIPT - SAFE TO DELETE AFTER RUNNING
+
 Migration script to create the user_passport table in the database.
 This table stores persistent membership data for users across devices.
+
+Note: This is a one-time migration script used to set up the database schema.
+Once run successfully, it is not needed and can be safely deleted.
 """
 
 import sqlite3

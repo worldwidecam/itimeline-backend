@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
+ONE-TIME-USE SCRIPT - SAFE TO DELETE
+
 Test script to verify the user passport system for membership persistence.
 This script tests the new passport endpoints that provide persistent membership data
 across devices and sessions.
+
+Note: This is a one-time test script used during development.
+It is not needed for production and can be safely deleted.
 """
 
 import os

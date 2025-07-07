@@ -103,6 +103,7 @@ def sync_user_passport():
                 'timeline_id': row['timeline_id'],
                 'role': row['role'],
                 'is_active_member': bool(row['is_active_member']),
+                'isMember': bool(row['is_active_member']),  # Add explicit isMember field for frontend compatibility
                 'joined_at': row['joined_at'],
                 'timeline_name': row['timeline_name'],
                 'visibility': row['visibility'],
@@ -122,7 +123,7 @@ def sync_user_passport():
             memberships.append({
                 'timeline_id': row['timeline_id'],
                 'role': 'admin',  # Creator is always admin
-                'is_active_member': True,
+                'is_active_member': True,  # This field is used by frontend as isMember
                 'joined_at': row['created_at'],
                 'timeline_name': row['timeline_name'],
                 'visibility': row['visibility'],
@@ -145,6 +146,7 @@ def sync_user_passport():
                     'timeline_id': row['timeline_id'],
                     'role': 'SiteOwner',
                     'is_active_member': True,
+                    'isMember': True,  # Add explicit isMember field for frontend compatibility
                     'joined_at': row['created_at'],
                     'timeline_name': row['timeline_name'],
                     'visibility': row['visibility'],

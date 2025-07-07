@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
+ONE-TIME-USE SCRIPT - SAFE TO DELETE
+
 Script to check the user_passport table and its contents.
 This helps verify that the passport system is working correctly.
+
+Note: This is a one-time diagnostic script used during development.
+It is not needed for production and can be safely deleted.
 """
 
 import os

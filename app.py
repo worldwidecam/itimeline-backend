@@ -23,6 +23,7 @@ import sqlalchemy
 from sqlalchemy import text
 import json
 from models import UserPassport
+from routes.passport import passport_bp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,9 @@ CORS(app, resources={
     }
 }, supports_credentials=True)
 print(f"CORS configured with allowed origins: {allowed_origins}")
+
+# Blueprint registration moved below
+print("Passport blueprint will be registered below")
 
 # Basic configurations
 app.config.update(

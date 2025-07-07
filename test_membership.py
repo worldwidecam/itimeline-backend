@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+ONE-TIME-USE SCRIPT - SAFE TO DELETE
+
+Test script for community timeline membership API endpoints.
+Used for development and debugging purposes only.
+
+Note: This is a one-time test script and can be safely deleted.
+"""
+
 import requests
 import json
 import sqlite3

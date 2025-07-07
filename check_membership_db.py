@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+ONE-TIME-USE SCRIPT - SAFE TO DELETE
+
+Diagnostic script to check membership records in the database.
+Used for development and debugging purposes only.
+
+Note: This is a one-time diagnostic script and can be safely deleted.
+"""
+
 import sqlite3
 import json
 
