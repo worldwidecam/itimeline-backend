@@ -2593,14 +2593,5 @@ def delete_timeline_v3_event(timeline_id, event_id):
             'message': f'Error deleting event: {str(e)}'
         }), 500
 
-
-# Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -13,13 +13,15 @@ Backend server for the iTimeline application, a modern web application for creat
 
 ### User Passport System
 - **Cross-Device Membership Persistence**: Maintains consistent timeline membership status across multiple devices and sessions
-- **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table
-- **User-Specific Caching**: Frontend caches passport data with user-specific localStorage keys
+- **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table in `instance/timeline_forum.db`
+- **User-Specific Caching**: Frontend caches passport data with consistent localStorage key format: `timeline_membership_${timelineId}`
 - **Automatic Synchronization**: Passport syncs with backend after membership changes
 - **Special Role Recognition**: Automatically recognizes timeline creators and site owners as members
 - **API Endpoints**:
   - `GET /api/v1/user/passport`: Fetches the user's complete membership passport
   - `POST /api/v1/user/passport/sync`: Synchronizes the passport with the latest membership data
+  - `GET /api/v1/timelines/{timelineId}/membership-status`: Checks membership status for a specific timeline
+  - `POST /api/v1/timelines/{timelineId}/access-requests`: Sends a request to join a timeline
 
 ### Date and Time Handling
 - **Raw Event Date Storage**: Stores event dates in the `raw_event_date` column as strings in the format `MM.DD.YYYY.HH.MM.AMPM`
@@ -191,35 +193,73 @@ To enable API documentation on your Render deployment:
 The backend provides the following API endpoints:
 
 ### Authentication
-- **POST /auth/register**: Register a new user
-- **POST /auth/login**: Log in an existing user
-- **POST /auth/logout**: Log out the current user
+- **POST /api/auth/register**: Register a new user
+- **POST /api/auth/login**: Log in an existing user
+- **POST /api/auth/logout**: Log out the current user
 
 ### Timelines
-- **GET /timelines**: Get all timelines
-- **POST /timelines**: Create a new timeline
-- **GET /timelines/<id>**: Get a specific timeline
-- **PUT /timelines/<id>**: Update a timeline
-- **DELETE /timelines/<id>**: Delete a timeline
+- **GET /api/v1/timelines**: Get all timelines
+- **POST /api/v1/timelines**: Create a new timeline
+- **GET /api/v1/timelines/{id}**: Get a specific timeline
+- **PUT /api/v1/timelines/{id}**: Update a timeline
+- **DELETE /api/v1/timelines/{id}**: Delete a timeline
 
 ### Events
-- **GET /events**: Get all events
-- **POST /events**: Create a new event
-- **GET /events/<id>**: Get a specific event
-- **PUT /events/<id>**: Update an event
-- **DELETE /events/<id>**: Delete an event
+- **GET /api/v1/events**: Get all events
+- **POST /api/v1/events**: Create a new event
+- **GET /api/v1/events/{id}**: Get a specific event
+- **PUT /api/v1/events/{id}**: Update an event
+- **DELETE /api/v1/events/{id}**: Delete an event
+
+### Community Features
+- **GET /api/v1/timelines/{timelineId}/membership-status**: Check membership status for a timeline
+- **POST /api/v1/timelines/{timelineId}/access-requests**: Request to join a timeline
+- **GET /api/v1/user/passport**: Get user's membership passport
+- **POST /api/v1/user/passport/sync**: Sync user's membership data
 
 ### File Uploads
-- **POST /upload**: Upload a file
-- **GET /uploads/<filename>**: Serve a file
+- **POST /api/upload**: Upload a file
+- **GET /api/uploads/{filename}**: Serve a file
+
+> **IMPORTANT**: The API endpoints listed in previous documentation without the `/api/v1` prefix are incorrect and should not be used. All community-related endpoints must use the `/api/v1` prefix.
 
 ## Troubleshooting
 
 - **Database Issues**: If you encounter database errors, try running `python reset_db.py` to reset the database
 - **File Upload Issues**: Check Cloudinary credentials and connectivity
 - **CORS Issues**: Ensure the frontend URL is correctly set in the CORS configuration
+- **Membership Persistence Issues**: Run `python fix_passport_sync.py` to synchronize all user passports with their actual membership data
+
+### Fixing Membership Persistence
+
+If users experience issues with their membership status not persisting across sessions:
+
+1. **Verify Database Path**: Ensure the backend is connecting to the correct database file at `instance/timeline_forum.db`
+2. **Check Passport Blueprint Registration**: Verify that `passport_bp` is registered in `app.py` with the prefix `/api/v1`
+3. **Verify CORS Configuration**: Ensure CORS is properly configured to allow requests from the frontend
+4. **Sync User Passports**: Run `python fix_passport_sync.py` to update all user passports with their complete membership data
+5. **Frontend Storage Keys**: Ensure the frontend uses consistent localStorage key format: `timeline_membership_${timelineId}`
 
 ## Known Issues
+
+### Incorrect Database Path
+
+**Issue Description**: Some parts of the application may incorrectly reference the database file at the root path `timeline_forum.db` instead of the correct path `instance/timeline_forum.db`.
+
+**Resolution**: We've updated critical components to use the correct database path, but there may still be some code that references the incorrect path. If you encounter database-related issues, check the database path being used.
+
+### Membership Persistence
+
+**Issue Description**: Previously, user membership status would not persist correctly across login/logout cycles due to:
+1. Missing passport blueprint registration in `app.py`
+2. Incomplete synchronization between the `timeline_member` table and `user_passport` table
+3. Inconsistent localStorage key formats in the frontend
+
+**Resolution**: We've implemented a comprehensive fix that ensures:
+- The passport blueprint is properly registered
+- All user passports are fully synchronized with their membership data
+- Special handling for creators and site owners is working correctly
+- Frontend uses consistent localStorage key formats
 
 ### Media File Serving for Event Cards
 

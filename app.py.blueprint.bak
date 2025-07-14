@@ -253,21 +253,6 @@ app.register_blueprint(cloudinary_bp, url_prefix='/api')
 app.register_blueprint(community_bp, url_prefix='/api/v1')
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(passport_bp, url_prefix='/api/v1')
-
-
-# Test endpoint for passport functionality
-@app.route('/api/test-passport', methods=['GET'])
-@jwt_required()
-def test_passport():
-    try:
-        current_user_id = get_jwt_identity()
-        return jsonify({
-            'message': 'Passport test endpoint working',
-            'user_id': current_user_id
-        }), 200
-    except Exception as e:
-        print(f"Error in test passport endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
 # Ensure CORS is applied to this blueprint
 
 # Ensure the database exists
@@ -2592,15 +2577,6 @@ def delete_timeline_v3_event(timeline_id, event_id):
             'success': False,
             'message': f'Error deleting event: {str(e)}'
         }), 500
-
-
-# Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

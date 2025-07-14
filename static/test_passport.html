@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Passport Test Tool</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+            background-color: #f9f9f9;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 15px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 20px;
+            margin: 8px 0;
+            box-sizing: border-box;
+            border: 2px solid #ccc;
+            border-radius: 4px;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+        .success {
+            color: green;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>User Passport Test Tool</h1>
+    
+    <div class="card">
+        <h2>Authentication</h2>
+        <p>Enter your JWT token from the frontend localStorage:</p>
+        <input type="text" id="token" placeholder="JWT Token">
+        <button id="validateToken">Validate Token</button>
+        <div id="tokenStatus"></div>
+    </div>
+    
+    <div class="card">
+        <h2>Test Endpoints</h2>
+        <button id="testEndpoint" disabled>Test Basic Endpoint</button>
+        <button id="getPassport" disabled>Get User Passport</button>
+        <button id="syncPassport" disabled>Sync User Passport</button>
+        <button id="checkMembership" disabled>Check Membership Status</button>
+        <input type="number" id="timelineId" placeholder="Timeline ID for membership check" value="1" disabled>
+    </div>
+    
+    <div class="card">
+        <h2>Results</h2>
+        <pre id="results">No results yet</pre>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const tokenInput = document.getElementById('token');
+            const validateTokenBtn = document.getElementById('validateToken');
+            const tokenStatus = document.getElementById('tokenStatus');
+            const testEndpointBtn = document.getElementById('testEndpoint');
+            const getPassportBtn = document.getElementById('getPassport');
+            const syncPassportBtn = document.getElementById('syncPassport');
+            const checkMembershipBtn = document.getElementById('checkMembership');
+            const timelineIdInput = document.getElementById('timelineId');
+            const resultsDisplay = document.getElementById('results');
+            
+            let token = '';
+            
+            // Try to get token from localStorage
+            try {
+                const storedToken = localStorage.getItem('authToken');
+                if (storedToken) {
+                    tokenInput.value = storedToken;
+                    tokenStatus.innerHTML = '<span class="success">Token loaded from localStorage</span>';
+                }
+            } catch (e) {
+                console.error('Error accessing localStorage:', e);
+            }
+            
+            validateTokenBtn.addEventListener('click', function() {
+                token = tokenInput.value.trim();
+                if (!token) {
+                    tokenStatus.innerHTML = '<span class="error">Please enter a token</span>';
+                    return;
+                }
+                
+                // Enable all buttons
+                testEndpointBtn.disabled = false;
+                getPassportBtn.disabled = false;
+                syncPassportBtn.disabled = false;
+                checkMembershipBtn.disabled = false;
+                timelineIdInput.disabled = false;
+                
+                tokenStatus.innerHTML = '<span class="success">Token set! You can now test the endpoints.</span>';
+            });
+            
+            testEndpointBtn.addEventListener('click', async function() {
+                try {
+                    const response = await fetch('http://localhost:5000/api/test-passport', {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    resultsDisplay.textContent = JSON.stringify(data, null, 2);
+                    
+                    if (response.ok) {
+                        resultsDisplay.innerHTML = '<span class="success">✓ Test endpoint successful!</span>\n\n' + JSON.stringify(data, null, 2);
+                    } else {
+                        resultsDisplay.innerHTML = '<span class="error">✗ Test endpoint failed</span>\n\n' + JSON.stringify(data, null, 2);
+                    }
+                } catch (error) {
+                    resultsDisplay.innerHTML = '<span class="error">✗ Error calling test endpoint</span>\n\n' + error.toString();
+                }
+            });
+            
+            getPassportBtn.addEventListener('click', async function() {
+                try {
+                    const response = await fetch('http://localhost:5000/api/v1/user/passport', {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        resultsDisplay.innerHTML = '<span class="success">✓ Get passport successful!</span>\n\n' + JSON.stringify(data, null, 2);
+                    } else {
+                        resultsDisplay.innerHTML = '<span class="error">✗ Get passport failed</span>\n\n' + JSON.stringify(data, null, 2);
+                    }
+                } catch (error) {
+                    resultsDisplay.innerHTML = '<span class="error">✗ Error getting passport</span>\n\n' + error.toString();
+                }
+            });
+            
+            syncPassportBtn.addEventListener('click', async function() {
+                try {
+                    const response = await fetch('http://localhost:5000/api/v1/user/passport/sync', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        resultsDisplay.innerHTML = '<span class="success">✓ Sync passport successful!</span>\n\n' + JSON.stringify(data, null, 2);
+                    } else {
+                        resultsDisplay.innerHTML = '<span class="error">✗ Sync passport failed</span>\n\n' + JSON.stringify(data, null, 2);
+                    }
+                } catch (error) {
+                    resultsDisplay.innerHTML = '<span class="error">✗ Error syncing passport</span>\n\n' + error.toString();
+                }
+            });
+            
+            checkMembershipBtn.addEventListener('click', async function() {
+                const timelineId = timelineIdInput.value.trim();
+                if (!timelineId) {
+                    resultsDisplay.innerHTML = '<span class="error">Please enter a timeline ID</span>';
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(`http://localhost:5000/api/v1/timelines/${timelineId}/membership-status`, {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        resultsDisplay.innerHTML = '<span class="success">✓ Check membership successful!</span>\n\n' + JSON.stringify(data, null, 2);
+                    } else {
+                        resultsDisplay.innerHTML = '<span class="error">✗ Check membership failed</span>\n\n' + JSON.stringify(data, null, 2);
+                    }
+                } catch (error) {
+                    resultsDisplay.innerHTML = '<span class="error">✗ Error checking membership</span>\n\n' + error.toString();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
