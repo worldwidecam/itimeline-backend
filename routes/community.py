@@ -459,77 +459,36 @@ def request_timeline_access(timeline_id):
 def check_membership_status(timeline_id):
     """Check if the current user is a member of the timeline and their role"""
     user_id = get_user_id()
-    print(f"DEBUG: Checking membership status for timeline {timeline_id}, user {user_id}")
     
-    # Get timeline details
+    # SiteOwner (user ID 1) always has access to all timelines
+    if user_id == 1:
+        return jsonify({
+            "is_member": True,
+            "role": "SiteOwner",
+            "timeline_visibility": Timeline.query.get_or_404(timeline_id).visibility
+        }), 200
+    
+    # Check if user is the creator of this timeline
     timeline = Timeline.query.get_or_404(timeline_id)
-    print(f"DEBUG: Timeline found: {timeline.id}, type: {timeline.timeline_type}, created by: {timeline.created_by}")
-    
-    # Check if user is SiteOwner (ID 1)
-    is_site_owner = (user_id == 1)
-    print(f"DEBUG: Is user the SiteOwner? {is_site_owner}")
-    
-    # Check if user is the creator
-    is_creator = (user_id == timeline.created_by)
-    print(f"DEBUG: Is user the creator? {is_creator}")
-    
-    # Check membership in database
+    if timeline.created_by == user_id:
+        # Creator is always an admin member
+        return jsonify({
+            "is_member": True,
+            "role": "admin",
+            "timeline_visibility": timeline.visibility
+        }), 200
+        
+    # For regular users, check database membership
     membership = TimelineMember.query.filter_by(
-        timeline_id=timeline_id, user_id=user_id
+        timeline_id=timeline_id,
+        user_id=user_id
     ).first()
     
-    print(f"DEBUG: Membership record found in database? {membership is not None}")
-    if membership:
-        print(f"DEBUG: Membership details - role: {membership.role}, joined_at: {membership.joined_at}")
-    
-    # Special case: SiteOwner always has access
-    if is_site_owner and not membership:
-        print("DEBUG: SiteOwner virtual membership being created")
-        # This is just for the response, not saved to DB
-        membership = TimelineMember(
-            timeline_id=timeline_id,
-            user_id=1,
-            role='SiteOwner',
-            is_active_member=True,
-            joined_at=timeline.created_at
-        )
-    
-    # Special case: Creator should always be an admin
-    # This is a fallback in case the creator wasn't properly added during timeline creation
-    if is_creator and not membership:
-        print("DEBUG: Creator virtual membership being created as admin")
-        # Create a real membership record in the database
-        membership = TimelineMember(
-            timeline_id=timeline_id,
-            user_id=user_id,
-            role='admin',
-            is_active_member=True,
-            joined_at=timeline.created_at
-        )
-        db.session.add(membership)
-        db.session.commit()
-        print("DEBUG: Creator admin membership saved to database")
-    
-    result = {
-        "is_member": False,
-        "role": None,
+    return jsonify({
+        "is_member": bool(membership and membership.is_active_member),
+        "role": membership.role if membership else None,
         "timeline_visibility": timeline.visibility
-    }
-    
-    if membership:
-        # Use the is_active_member field directly instead of checking role
-        result["is_member"] = membership.is_active_member
-        result["role"] = membership.role
-        result["joined_at"] = membership.joined_at.isoformat() if membership.joined_at else None
-        
-    # Special case: Creator and SiteOwner are always considered members
-    # This ensures the UI shows the correct buttons
-    if is_creator or is_site_owner:
-        print(f"DEBUG: User is {'creator' if is_creator else 'SiteOwner'}, setting is_member to True")
-        result["is_member"] = True
-    
-    print(f"DEBUG: Final membership result: {result}")
-    return jsonify(result), 200
+    }), 200
 
 @community_bp.route('/user/memberships', methods=['GET'])
 @jwt_required()

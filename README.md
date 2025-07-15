@@ -12,6 +12,19 @@ Backend server for the iTimeline application, a modern web application for creat
 - User-specific membership persistence with Passport system
 
 ### User Passport System
+- **Membership Levels**:
+  1. **SiteOwner (User ID 1)**: Always has access to all timelines regardless of database state
+     - Membership status is forced to true
+     - Never sees "Join Community" buttons
+     - Status persists across sessions and devices
+  2. **Timeline Creators**: Automatically granted admin access to their own timelines
+     - Membership is created during timeline creation
+     - Fallback mechanism ensures admin access if record is missing
+     - Status persists across sessions
+  3. **Regular Members**: Must join timelines through the UI
+     - Public timelines: Immediate membership
+     - Private timelines: Requires approval from admins
+     - Status is cached in localStorage with 30-minute expiration
 - **Cross-Device Membership Persistence**: Maintains consistent timeline membership status across multiple devices and sessions
 - **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table in `instance/timeline_forum.db`
 - **User-Specific Caching**: Frontend caches passport data with consistent localStorage key format: `timeline_membership_${timelineId}`
