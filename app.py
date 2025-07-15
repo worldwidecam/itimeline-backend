@@ -34,20 +34,47 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configure CORS to allow frontend to access backend resources - MOVED BEFORE BLUEPRINT REGISTRATION
+# Configure CORS to allow frontend to access backend resources
 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-allowed_origins = [frontend_url, 'http://localhost:3000', 'http://localhost:3001', 'https://i-timeline.com']
-CORS(app, 
-    resources={r"/*": {"origins": "*"}},
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    expose_headers=["Content-Type", "Authorization"]
+allowed_origins = [
+    frontend_url, 
+    'http://localhost:3000', 
+    'http://localhost:3001', 
+    'https://i-timeline.com',
+    'https://www.i-timeline.com',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5000',
+    'http://localhost:5000'
+]
+
+# Enable CORS with specific settings
+cors = CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+            "expose_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True,
+            "max_age": 600  # Cache preflight request for 10 minutes
+        }
+    }
 )
 
-# Add CORS headers to all responses
-app = add_cors_headers(app)
-print(f"CORS configured with allowed origins: {allowed_origins}")
+print(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
+
+# Handle OPTIONS requests for all routes (simplified, as flask_cors should handle this)
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', '*'))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        response.headers.add("Access-Control-Max-Age", "600")
+        return response
 
 # We'll add direct API endpoints for user passport instead of using blueprints
 print("Using direct API endpoints for user passport")
