@@ -1719,17 +1719,16 @@ def create_timeline_v3():
         db.session.add(new_timeline)
         db.session.flush()  # Get the timeline ID before committing
         
-        # If this is a community timeline, add the creator as an admin
-        if data.get('timeline_type') == 'community':
-            logger.info(f"Adding creator as admin for community timeline: {new_timeline.id}")
-            admin = TimelineMember(
-                timeline_id=new_timeline.id,
-                user_id=current_user_id,
-                role='admin',
-                is_active_member=True,  # Always active for creator
-                joined_at=datetime.now()
-            )
-            db.session.add(admin)
+        # Add creator as admin regardless of timeline type
+        logger.info(f"Adding creator as admin for timeline: {new_timeline.id}")
+        admin = TimelineMember(
+            timeline_id=new_timeline.id,
+            user_id=current_user_id,
+            role='admin',
+            is_active_member=True,  # Always active for creator
+            joined_at=datetime.now()
+        )
+        db.session.add(admin)
         
         db.session.commit()
         

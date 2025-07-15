@@ -475,20 +475,35 @@ def check_membership_status(timeline_id):
         return jsonify({
             "is_member": True,
             "role": "admin",
-            "timeline_visibility": timeline.visibility
+            "timeline_visibility": timeline.visibility,
+            "is_creator": True
         }), 200
         
     # For regular users, check database membership
-    membership = TimelineMember.query.filter_by(
-        timeline_id=timeline_id,
-        user_id=user_id
-    ).first()
-    
-    return jsonify({
-        "is_member": bool(membership and membership.is_active_member),
-        "role": membership.role if membership else None,
-        "timeline_visibility": timeline.visibility
-    }), 200
+    try:
+        # Get timeline
+        timeline = Timeline.query.get_or_404(timeline_id)
+        
+        # Get membership
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        return jsonify({
+            "is_member": bool(membership and membership.is_active_member),
+            "role": membership.role if membership else None,
+            "timeline_visibility": timeline.visibility
+        }), 200
+        
+    except Exception as e:
+        # Log the error but still return a safe response
+        logger.error(f"Error checking membership status: {str(e)}")
+        return jsonify({
+            "is_member": False,
+            "role": None,
+            "timeline_visibility": "public"  # Default to public if we can't determine
+        }), 200
 
 @community_bp.route('/user/memberships', methods=['GET'])
 @jwt_required()
