@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
@@ -7,7 +7,6 @@ from flask_jwt_extended import (
     verify_jwt_in_request
 )
 from flask_cors import CORS
-from cors_handler import add_cors_headers
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -47,34 +46,14 @@ allowed_origins = [
     'http://localhost:5000'
 ]
 
-# Enable CORS with specific settings
-cors = CORS(
-    app,
-    resources={
-        r"/*": {
-            "origins": allowed_origins,
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-            "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
-            "expose_headers": ["Content-Type", "Authorization"],
-            "supports_credentials": True,
-            "max_age": 600  # Cache preflight request for 10 minutes
-        }
-    }
-)
+# Enable CORS with simple configuration
+cors = CORS(app, 
+           origins=['*'],  # Allow all origins for debugging
+           methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+           allow_headers=['*'],  # Allow all headers
+           supports_credentials=True)
 
 print(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
-
-# Handle OPTIONS requests for all routes (simplified, as flask_cors should handle this)
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', '*'))
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        response.headers.add("Access-Control-Max-Age", "600")
-        return response
 
 # We'll add direct API endpoints for user passport instead of using blueprints
 print("Using direct API endpoints for user passport")
@@ -295,7 +274,6 @@ def test_passport():
     except Exception as e:
         print(f"Error in test passport endpoint: {str(e)}")
         return jsonify({'error': str(e)}), 500
-# Ensure CORS is applied to this blueprint
 
 # Ensure the database exists
 with app.app_context():
@@ -2620,13 +2598,112 @@ def delete_timeline_v3_event(timeline_id, event_id):
         }), 500
 
 
-# Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+@app.route('/api/v1/timelines/<int:timeline_id>/members', methods=['GET'])
+@jwt_required()
+def get_timeline_members(timeline_id):
+    """
+    Get all members of a timeline with their usernames, avatars, and highest roles.
+    
+    Returns:
+        JSON array of members with their details
+    """
+    try:
+        # Get the current user ID from the JWT token
+        current_user_id = get_jwt_identity()
+        print(f"[DEBUG] Getting members for timeline {timeline_id}, user {current_user_id}")
+        
+        # Check if the timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            print(f"[DEBUG] Timeline {timeline_id} not found")
+            return jsonify({
+                'success': False,
+                'message': 'Timeline not found'
+            }), 404
+        
+        print(f"[DEBUG] Timeline {timeline_id} found, visibility: {timeline.visibility}")
+            
+        # Check if the current user is a member of the timeline
+        current_membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=current_user_id,
+            is_active_member=True
+        ).first()
+        
+        print(f"[DEBUG] Current user membership: {current_membership}")
+        
+        # Only allow members to see other members (or if it's a public timeline)
+        if not current_membership and timeline.visibility != 'public':
+            print(f"[DEBUG] Access denied - user not member and timeline not public")
+            return jsonify({
+                'success': False,
+                'message': 'You must be a member to view members of this timeline'
+            }), 403
+            
+        # Get all active members of the timeline with their user details
+        print(f"[DEBUG] Querying for members of timeline {timeline_id}")
+        
+        # First, let's check if there are ANY timeline members for this timeline
+        all_timeline_members = TimelineMember.query.filter_by(timeline_id=timeline_id).all()
+        print(f"[DEBUG] Found {len(all_timeline_members)} total timeline members (active and inactive)")
+        
+        # Check active members specifically
+        active_timeline_members = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            is_active_member=True
+        ).all()
+        print(f"[DEBUG] Found {len(active_timeline_members)} active timeline members")
+        
+        members = db.session.query(
+            User.id,
+            User.username,
+            User.avatar_url,
+            TimelineMember.role
+        ).join(
+            TimelineMember, User.id == TimelineMember.user_id
+        ).filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == True
+        ).all()
+        
+        print(f"[DEBUG] Query returned {len(members)} members with user details")
+        
+        # Process members to handle role hierarchy
+        processed_members = []
+        for member in members:
+            user_id, username, avatar_url, role = member
+            
+            # Check if user is the site owner (user ID 1)
+            if user_id == 1:
+                role = 'SiteOwner'
+            # If user is the timeline creator, ensure they're at least admin
+            elif user_id == timeline.created_by and role != 'SiteOwner':
+                role = 'admin'
+                
+            processed_members.append({
+                'id': user_id,
+                'username': username,
+                'avatar_url': avatar_url,
+                'role': role
+            })
+        
+        # Sort members by role (SiteOwner > admin > moderator > member > pending)
+        role_order = {'SiteOwner': 0, 'admin': 1, 'moderator': 2, 'member': 3, 'pending': 4}
+        processed_members.sort(key=lambda x: role_order.get(x['role'], 5))
+        
+        return jsonify({
+            'success': True,
+            'members': processed_members
+        })
+        
+    except Exception as e:
+        print(f"Error fetching timeline members: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error fetching timeline members: {str(e)}'
+        }), 500
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

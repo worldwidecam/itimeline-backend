@@ -8,11 +8,12 @@ This module contains all routes related to community timelines, including:
 - Sharing posts between communities
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from marshmallow import ValidationError
+import sqlite3
 
 # Create blueprint first, before any circular imports can happen
 community_bp = Blueprint('community', __name__)
@@ -47,41 +48,59 @@ def check_timeline_access(timeline_id, required_role=None):
         required_role: Minimum role required (None = any member, 'moderator', 'admin')
         
     Returns:
-        tuple: (timeline, membership, has_access)
+        tuple: (timeline_dict, membership_dict, has_access)
     """
-    # Import models here to avoid circular imports
-    from app import Timeline, TimelineMember
-    
     user_id = get_user_id()
-    timeline = Timeline.query.get_or_404(timeline_id)
     
-    # SiteOwner (user ID 1) always has access to any timeline
-    if user_id == 1:
-        membership = TimelineMember.query.filter_by(
-            timeline_id=timeline_id, user_id=user_id
-        ).first()
+    # Use direct SQLite3 connection to avoid SQLAlchemy issues
+    conn = sqlite3.connect('timeline_forum.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        # Get timeline information
+        cursor.execute('SELECT * FROM timeline WHERE id = ?', (timeline_id,))
+        timeline_row = cursor.fetchone()
+        if not timeline_row:
+            conn.close()
+            return None, None, False
         
-        # If SiteOwner is not yet a member, create a virtual membership with SiteOwner role
-        if not membership:
-            membership = TimelineMember(
-                timeline_id=timeline_id,
-                user_id=1,
-                role='SiteOwner'
+        timeline = dict(timeline_row)
+        
+        # SiteOwner (user ID 1) always has access to any timeline
+        if user_id == 1:
+            cursor.execute(
+                'SELECT * FROM timeline_member WHERE timeline_id = ? AND user_id = ?',
+                (timeline_id, user_id)
             )
+            membership_row = cursor.fetchone()
+            membership = dict(membership_row) if membership_row else None
+            conn.close()
+            return timeline, membership, True
         
-        return timeline, membership, True
-    
-    # If public timeline, anyone can view
-    if timeline.visibility == 'public' and required_role is None:
-        membership = TimelineMember.query.filter_by(
-            timeline_id=timeline_id, user_id=user_id
-        ).first()
-        return timeline, membership, True
-    
-    # Check membership
-    membership = TimelineMember.query.filter_by(
-        timeline_id=timeline_id, user_id=user_id
-    ).first()
+        # Check if user is a member of the timeline
+        cursor.execute(
+            'SELECT * FROM timeline_member WHERE timeline_id = ? AND user_id = ? AND is_active_member = 1',
+            (timeline_id, user_id)
+        )
+        membership_row = cursor.fetchone()
+        membership = dict(membership_row) if membership_row else None
+        
+        # Check if user has the required role
+        if required_role and membership:
+            role_hierarchy = {'member': 1, 'moderator': 2, 'admin': 3}
+            user_role_level = role_hierarchy.get(membership['role'], 0)
+            required_role_level = role_hierarchy.get(required_role, 0)
+            has_access = user_role_level >= required_role_level
+        else:
+            has_access = membership is not None
+        
+        conn.close()
+        return timeline, membership, has_access
+        
+    except Exception as e:
+        conn.close()
+        raise e
     
     if not membership:
         return timeline, None, False
@@ -149,80 +168,107 @@ def create_community_timeline():
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['GET'])
 @jwt_required()
 def get_timeline_members(timeline_id):
-    """Get all members of a timeline"""
-    # Import models here to avoid circular imports
-    from app import db, TimelineMember, User, Timeline
-    
+    """Get all members of a timeline using direct SQLite3 queries"""
     timeline, membership, has_access = check_timeline_access(timeline_id)
     
     if not has_access:
         return jsonify({"error": "Access denied"}), 403
     
-    # Import joinedload for eager loading relationships
-    from sqlalchemy.orm import joinedload
+    # Use direct SQLite3 connection to avoid SQLAlchemy issues
+    conn = sqlite3.connect('timeline_forum.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
     
-    # Get all members from the TimelineMember table with eager loading of user relationship
-    members = TimelineMember.query.options(joinedload(TimelineMember.user)).filter_by(timeline_id=timeline_id).all()
-    result = members_schema.dump(members)
-    
-    # Debug: Print what we're getting from the database
-    print(f"Found {len(members)} members in database")
-    for member in members:
-        print(f"Member: {member.user_id}, Role: {member.role}, User loaded: {member.user is not None}")
-        if member.user:
-            print(f"  Username: {member.user.username}")
-    
-    # Check if Brahdyssey (user ID 1) is already in the members list
-    brahdyssey_in_members = any(m['user_id'] == 1 for m in result)
-    
-    # If Brahdyssey is not in the members list, add them with SiteOwner role
-    # SiteOwner role is ONLY for Brahdyssey (user ID 1)
-    if not brahdyssey_in_members:
-        # Get Brahdyssey's user information
-        brahdyssey = User.query.get(1)
-        if brahdyssey:
-            # Create a temporary TimelineMember object for Brahdyssey
-            brahdyssey_member = TimelineMember(
-                timeline_id=timeline_id,
-                user_id=1,
-                role='SiteOwner',  # SiteOwner role is ONLY for Brahdyssey
-                joined_at=timeline.created_at
-            )
-            # Add Brahdyssey to the result
-            brahdyssey_result = member_schema.dump(brahdyssey_member)
-            result.append(brahdyssey_result)
-            print(f"Added SiteOwner {brahdyssey.username} (ID: {brahdyssey.id}) to members list")
-    
-    # Normalize roles in the result (ensure consistent capitalization)
-    for member in result:
-        if member['role'].lower() == 'admin':
-            member['role'] = 'Admin'
-        elif member['role'].lower() == 'moderator':
-            member['role'] = 'Moderator'
-        elif member['role'].lower() == 'member':
-            member['role'] = 'Member'
-    
-    # Check if the creator is already in the members list
-    creator_in_members = any(m['user_id'] == timeline.created_by for m in result)
-    
-    # If the creator is not in the members list and is not Brahdyssey, add them with Admin role
-    if not creator_in_members and timeline.created_by != 1:
-        # Get the creator's user information
-        creator = User.query.get(timeline.created_by)
-        if creator:
-            # Create a temporary TimelineMember object for the creator
-            creator_member = TimelineMember(
-                timeline_id=timeline_id,
-                user_id=creator.id,
-                role='Admin',  # Timeline creators get Admin role
-                joined_at=timeline.created_at  # They joined when they created it
-            )
-            # Add the creator to the result
-            creator_result = member_schema.dump(creator_member)
-            result.append(creator_result)
-            print(f"Added creator {creator.username} (ID: {creator.id}) to members list with Admin role")
-    
-    return jsonify(result), 200
+    try:
+        # Get all members with user information
+        cursor.execute("""
+            SELECT tm.*, u.username, u.email, u.avatar_url, u.bio
+            FROM timeline_member tm
+            JOIN user u ON tm.user_id = u.id
+            WHERE tm.timeline_id = ?
+            ORDER BY tm.joined_at ASC
+        """, (timeline_id,))
+        
+        members_rows = cursor.fetchall()
+        result = []
+        
+        for row in members_rows:
+            member_data = {
+                'id': row['id'],
+                'timeline_id': row['timeline_id'],
+                'user_id': row['user_id'],
+                'role': row['role'],
+                'is_active_member': bool(row['is_active_member']),
+                'joined_at': row['joined_at'],
+                'invited_by': row['invited_by'],
+                'user': {
+                    'id': row['user_id'],
+                    'username': row['username'],
+                    'email': row['email'],
+                    'avatar_url': row['avatar_url'],
+                    'bio': row['bio']
+                }
+            }
+            result.append(member_data)
+        
+        # Check if Brahdyssey (user ID 1) is already in the members list
+        brahdyssey_in_members = any(m['user_id'] == 1 for m in result)
+        
+        # If Brahdyssey is not in the members list, add them with SiteOwner role
+        if not brahdyssey_in_members:
+            cursor.execute('SELECT * FROM user WHERE id = 1')
+            brahdyssey_row = cursor.fetchone()
+            if brahdyssey_row:
+                brahdyssey_data = {
+                    'id': None,  # Virtual member, no database ID
+                    'timeline_id': timeline_id,
+                    'user_id': 1,
+                    'role': 'SiteOwner',
+                    'is_active_member': True,
+                    'joined_at': timeline['created_at'],
+                    'invited_by': None,
+                    'user': {
+                        'id': 1,
+                        'username': brahdyssey_row['username'],
+                        'email': brahdyssey_row['email'],
+                        'avatar_url': brahdyssey_row['avatar_url'],
+                        'bio': brahdyssey_row['bio']
+                    }
+                }
+                result.append(brahdyssey_data)
+        
+        # Check if the creator is already in the members list
+        creator_in_members = any(m['user_id'] == timeline['created_by'] for m in result)
+        
+        # If the creator is not in the members list and is not Brahdyssey, add them with Admin role
+        if not creator_in_members and timeline['created_by'] != 1:
+            cursor.execute('SELECT * FROM user WHERE id = ?', (timeline['created_by'],))
+            creator_row = cursor.fetchone()
+            if creator_row:
+                creator_data = {
+                    'id': None,  # Virtual member, no database ID
+                    'timeline_id': timeline_id,
+                    'user_id': timeline['created_by'],
+                    'role': 'Admin',
+                    'is_active_member': True,
+                    'joined_at': timeline['created_at'],
+                    'invited_by': None,
+                    'user': {
+                        'id': timeline['created_by'],
+                        'username': creator_row['username'],
+                        'email': creator_row['email'],
+                        'avatar_url': creator_row['avatar_url'],
+                        'bio': creator_row['bio']
+                    }
+                }
+                result.append(creator_data)
+        
+        conn.close()
+        return jsonify(result), 200
+        
+    except Exception as e:
+        conn.close()
+        return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['POST'])
 @jwt_required()

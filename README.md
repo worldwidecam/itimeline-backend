@@ -2,6 +2,51 @@
 
 Backend server for the iTimeline application, a modern web application for creating and sharing timelines with interactive event cards.
 
+## Important Configuration Notes
+
+### CORS Configuration
+
+**DO NOT** mix multiple CORS implementations as it will cause duplicate headers and break the application. The project uses `flask-cors` with the following configuration in `app.py`:
+
+```python
+# Enable CORS with specific settings
+cors = CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+            "expose_headers": ["Content-Type", "Authorization", "X-Total-Count"],
+            "supports_credentials": True,
+            "max_age": 600  # Cache preflight request for 10 minutes
+        }
+    }
+)
+```
+
+**Important**: Do not add additional `@app.after_request` or `@app.before_request` handlers for CORS as they will conflict with the above configuration.
+
+### Development Best Practices
+
+1. **Database Migrations**:
+   - Always use SQLAlchemy migrations for schema changes
+   - Never modify the database schema directly in production
+
+2. **Environment Variables**:
+   - Keep all sensitive configuration in environment variables
+   - Use `.env` file for local development (add to `.gitignore`)
+   - Document all required environment variables in this README
+
+3. **Error Handling**:
+   - Ensure all API endpoints have proper error handling
+   - Log errors with appropriate context for debugging
+   - Return consistent error response formats
+
+4. **API Versioning**:
+   - All API routes should be prefixed with `/api/v1/`
+   - Document breaking changes when incrementing the API version
+
 ## Features
 
 - RESTful API for timeline and event management
