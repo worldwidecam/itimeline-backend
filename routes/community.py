@@ -169,10 +169,8 @@ def create_community_timeline():
 @jwt_required()
 def get_timeline_members(timeline_id):
     """Get all members of a timeline using direct SQLite3 queries"""
-    timeline, membership, has_access = check_timeline_access(timeline_id)
-    
-    if not has_access:
-        return jsonify({"error": "Access denied"}), 403
+    # Remove access control - allow anyone to view member lists
+    user_id = get_user_id()
     
     # Use direct SQLite3 connection to avoid SQLAlchemy issues
     conn = sqlite3.connect('timeline_forum.db')
@@ -504,14 +502,18 @@ def request_timeline_access(timeline_id):
 @jwt_required()
 def check_membership_status(timeline_id):
     """Check if the current user is a member of the timeline and their role"""
+    # Import models locally to avoid circular imports
+    from app import Timeline, TimelineMember, User, db
+    
     user_id = get_user_id()
     
     # SiteOwner (user ID 1) always has access to all timelines
     if user_id == 1:
+        timeline = Timeline.query.get_or_404(timeline_id)
         return jsonify({
             "is_member": True,
             "role": "SiteOwner",
-            "timeline_visibility": Timeline.query.get_or_404(timeline_id).visibility
+            "timeline_visibility": timeline.visibility
         }), 200
     
     # Check if user is the creator of this timeline
@@ -527,9 +529,6 @@ def check_membership_status(timeline_id):
         
     # For regular users, check database membership
     try:
-        # Get timeline
-        timeline = Timeline.query.get_or_404(timeline_id)
-        
         # Get membership
         membership = TimelineMember.query.filter_by(
             timeline_id=timeline_id,

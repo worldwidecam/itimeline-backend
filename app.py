@@ -21,6 +21,7 @@ from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
 import sqlalchemy
 from sqlalchemy import text
+import sqlite3
 import json
 from models import UserPassport
 # Import necessary functions from passport module
@@ -69,25 +70,18 @@ def get_user_passport():
         # Get current user ID from JWT
         current_user_id = get_jwt_identity()
         
-        # Connect to database
-        conn = sqlite3.connect('timeline_forum.db')
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Check if user has a passport
-        cursor.execute(
-            'SELECT * FROM user_passport WHERE user_id = ?',
-            (current_user_id,)
-        )
-        passport = cursor.fetchone()
+        # Check if user has a passport using SQLAlchemy
+        passport = UserPassport.query.filter_by(user_id=current_user_id).first()
         
         if not passport:
             # Create a new passport if one doesn't exist
-            cursor.execute(
-                'INSERT INTO user_passport (user_id, memberships_json, last_updated) VALUES (?, ?, ?)',
-                (current_user_id, '[]', datetime.now().isoformat())
+            passport = UserPassport(
+                user_id=current_user_id,
+                memberships_json='[]',
+                last_updated=datetime.now()
             )
-            conn.commit()
+            db.session.add(passport)
+            db.session.commit()
             
             # Return empty memberships
             return jsonify({
@@ -97,22 +91,19 @@ def get_user_passport():
         
         # Parse memberships from JSON
         try:
-            memberships = json.loads(passport['memberships_json'])
+            memberships = json.loads(passport.memberships_json)
         except json.JSONDecodeError:
             memberships = []
         
         # Return passport data
         return jsonify({
             'memberships': memberships,
-            'last_updated': passport['last_updated']
+            'last_updated': passport.last_updated.isoformat() if passport.last_updated else datetime.now().isoformat()
         }), 200
         
     except Exception as e:
         logger.error(f"Error getting user passport: {str(e)}")
         return jsonify({'error': 'Failed to get user passport'}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 @app.route('/api/v1/user/passport/sync', methods=['POST'])
 @jwt_required()
@@ -2623,23 +2614,6 @@ def get_timeline_members(timeline_id):
         
         print(f"[DEBUG] Timeline {timeline_id} found, visibility: {timeline.visibility}")
             
-        # Check if the current user is a member of the timeline
-        current_membership = TimelineMember.query.filter_by(
-            timeline_id=timeline_id,
-            user_id=current_user_id,
-            is_active_member=True
-        ).first()
-        
-        print(f"[DEBUG] Current user membership: {current_membership}")
-        
-        # Only allow members to see other members (or if it's a public timeline)
-        if not current_membership and timeline.visibility != 'public':
-            print(f"[DEBUG] Access denied - user not member and timeline not public")
-            return jsonify({
-                'success': False,
-                'message': 'You must be a member to view members of this timeline'
-            }), 403
-            
         # Get all active members of the timeline with their user details
         print(f"[DEBUG] Querying for members of timeline {timeline_id}")
         
@@ -2703,6 +2677,358 @@ def get_timeline_members(timeline_id):
             'message': f'Error fetching timeline members: {str(e)}'
         }), 500
 
+
+@app.route('/api/v1/timelines/<int:timeline_id>/access-requests', methods=['POST'])
+@jwt_required()
+def request_timeline_access(timeline_id):
+    """
+    Request access to join a community timeline.
+    For public timelines, user is immediately added as a member.
+    For private timelines, user is added with 'pending' status.
+    """
+    try:
+        # Get the current user ID from the JWT token
+        current_user_id = get_jwt_identity()
+        print(f"[DEBUG] User {current_user_id} requesting access to timeline {timeline_id}")
+        
+        # Check if the timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            print(f"[DEBUG] Timeline {timeline_id} not found")
+            return jsonify({
+                'success': False,
+                'message': 'Timeline not found'
+            }), 404
+        
+        print(f"[DEBUG] Timeline {timeline_id} found, type: {timeline.timeline_type}, visibility: {timeline.visibility}")
+        
+        # Check if user is already a member
+        existing_membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=current_user_id
+        ).first()
+        
+        if existing_membership:
+            if existing_membership.is_active_member:
+                print(f"[DEBUG] User {current_user_id} is already an active member")
+                return jsonify({
+                    'success': True,
+                    'message': 'You are already a member of this timeline',
+                    'status': 'already_member',
+                    'role': existing_membership.role
+                })
+            else:
+                # Reactivate the membership
+                existing_membership.is_active_member = True
+                existing_membership.joined_at = datetime.now()
+                print(f"[DEBUG] Reactivating membership for user {current_user_id}")
+        else:
+            # Create new membership
+            # Determine role and status based on timeline visibility
+            if timeline.visibility == 'public':
+                role = 'member'
+                is_active = True
+                status_message = 'You have successfully joined this community timeline'
+                status = 'joined'
+            else:  # private timeline
+                role = 'pending'
+                is_active = False  # Pending members are not active until approved
+                status_message = 'Your request to join this private timeline has been submitted for approval'
+                status = 'pending'
+            
+            # Special handling for site owner (user ID 1)
+            if current_user_id == 1:
+                role = 'SiteOwner'
+                is_active = True
+                status_message = 'Site owner access granted'
+                status = 'joined'
+            
+            # Create the membership record
+            new_membership = TimelineMember(
+                timeline_id=timeline_id,
+                user_id=current_user_id,
+                role=role,
+                is_active_member=is_active,
+                joined_at=datetime.now()
+            )
+            
+            db.session.add(new_membership)
+            print(f"[DEBUG] Created new membership for user {current_user_id} with role {role}, active: {is_active}")
+        
+        # Commit the changes
+        db.session.commit()
+        
+        # Return success response
+        response_data = {
+            'success': True,
+            'message': status_message,
+            'status': status,
+            'role': role if 'role' in locals() else existing_membership.role,
+            'timeline_id': timeline_id,
+            'user_id': current_user_id
+        }
+        
+        print(f"[DEBUG] Successfully processed access request: {response_data}")
+        return jsonify(response_data)
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error processing timeline access request: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error processing access request: {str(e)}'
+        }), 500
+
+
+# =============================================================================
+# NEW CLEAN MEMBERSHIP SYSTEM ENDPOINTS
+# Pure SQLAlchemy implementation with consistent API
+# =============================================================================
+
+def get_current_user_id():
+    """Get the current user ID from JWT token"""
+    try:
+        current_user = get_jwt_identity()
+        if isinstance(current_user, dict):
+            return current_user.get('id')
+        return current_user
+    except Exception as e:
+        print(f"Error getting user ID: {e}")
+        return None
+
+def is_site_owner(user_id):
+    """Check if user is the site owner (User ID 1)"""
+    return user_id == 1
+
+def ensure_creator_membership(timeline_id, creator_id):
+    """Ensure timeline creator has admin membership"""
+    try:
+        # Check if membership already exists
+        existing = TimelineMember.query.filter_by(
+            timeline_id=timeline_id, 
+            user_id=creator_id
+        ).first()
+        
+        if not existing:
+            # Create admin membership for creator
+            membership = TimelineMember(
+                timeline_id=timeline_id,
+                user_id=creator_id,
+                role='admin',
+                is_active_member=True,
+                joined_at=datetime.now()
+            )
+            db.session.add(membership)
+            db.session.commit()
+            print(f"Created admin membership for creator {creator_id} in timeline {timeline_id}")
+            return membership
+        else:
+            # Ensure creator has admin role
+            if existing.role not in ['admin', 'siteowner']:
+                existing.role = 'admin'
+                db.session.commit()
+                print(f"Updated creator {creator_id} to admin role in timeline {timeline_id}")
+            return existing
+    except Exception as e:
+        print(f"Error ensuring creator membership: {e}")
+        db.session.rollback()
+        return None
+
+@app.route('/api/v1/membership/timelines/<int:timeline_id>/members', methods=['GET'])
+@jwt_required()
+def get_timeline_members_new(timeline_id):
+    """Get all members of a timeline - NEW CLEAN VERSION"""
+    try:
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 20, type=int)
+        
+        # Query members with user data
+        members_query = db.session.query(
+            TimelineMember.id,
+            TimelineMember.role,
+            TimelineMember.joined_at,
+            TimelineMember.is_active_member,
+            User.id.label('user_id'),
+            User.username,
+            User.email,
+            User.avatar_url
+        ).join(
+            User, TimelineMember.user_id == User.id
+        ).filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == True
+        ).order_by(
+            # Role hierarchy: siteowner > admin > moderator > member
+            db.case(
+                (TimelineMember.role == 'siteowner', 1),
+                (TimelineMember.role == 'admin', 2),
+                (TimelineMember.role == 'moderator', 3),
+                (TimelineMember.role == 'member', 4),
+                else_=5
+            ),
+            TimelineMember.joined_at.asc()
+        )
+        
+        # Apply pagination
+        paginated = members_query.paginate(
+            page=page, 
+            per_page=limit, 
+            error_out=False
+        )
+        
+        # Format response
+        members = []
+        for member in paginated.items:
+            members.append({
+                'id': member.id,
+                'user_id': member.user_id,
+                'username': member.username,
+                'email': member.email,
+                'avatar_url': member.avatar_url,
+                'role': member.role,
+                'joined_at': member.joined_at.isoformat() if member.joined_at else None,
+                'is_active': member.is_active_member
+            })
+        
+        return jsonify({
+            'members': members,
+            'total': paginated.total,
+            'page': page,
+            'pages': paginated.pages,
+            'has_next': paginated.has_next,
+            'has_prev': paginated.has_prev
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting timeline members: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/membership/timelines/<int:timeline_id>/join', methods=['POST'])
+@jwt_required()
+def join_timeline_new(timeline_id):
+    """Join a timeline as a member - NEW CLEAN VERSION"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user is already a member
+        existing = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        if existing:
+            if existing.is_active_member:
+                return jsonify({"error": "Already a member"}), 400
+            else:
+                # Reactivate membership
+                existing.is_active_member = True
+                existing.joined_at = datetime.now()
+                db.session.commit()
+                return jsonify({
+                    "message": "Membership reactivated",
+                    "role": existing.role
+                }), 200
+        
+        # Determine role based on user status
+        role = 'member'  # Default role
+        if is_site_owner(user_id):
+            role = 'siteowner'
+        elif timeline.created_by == user_id:
+            role = 'admin'  # Timeline creator gets admin
+        
+        # Create new membership
+        membership = TimelineMember(
+            timeline_id=timeline_id,
+            user_id=user_id,
+            role=role,
+            is_active_member=True,
+            joined_at=datetime.now()
+        )
+        
+        db.session.add(membership)
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Successfully joined timeline",
+            "role": role,
+            "joined_at": membership.joined_at.isoformat()
+        }), 201
+        
+    except Exception as e:
+        print(f"Error joining timeline: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/membership/timelines/<int:timeline_id>/status', methods=['GET'])
+@jwt_required()
+def check_membership_status_new(timeline_id):
+    """Check current user's membership status for a timeline - NEW CLEAN VERSION"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check membership
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        # Determine status
+        is_member = False
+        role = None
+        joined_at = None
+        
+        if membership and membership.is_active_member:
+            is_member = True
+            role = membership.role
+            joined_at = membership.joined_at.isoformat() if membership.joined_at else None
+        elif is_site_owner(user_id):
+            # Site owner always has access
+            is_member = True
+            role = 'siteowner'
+            # Ensure site owner has membership record
+            ensure_creator_membership(timeline_id, user_id)
+        elif timeline.created_by == user_id:
+            # Creator always has access
+            is_member = True
+            role = 'admin'
+            # Ensure creator has membership record
+            ensure_creator_membership(timeline_id, user_id)
+        
+        return jsonify({
+            'is_member': is_member,
+            'role': role,
+            'joined_at': joined_at,
+            'timeline_id': timeline_id,
+            'timeline_name': timeline.name,
+            'timeline_type': timeline.timeline_type,
+            'timeline_visibility': timeline.visibility,
+            'is_creator': timeline.created_by == user_id,
+            'is_site_owner': is_site_owner(user_id)
+        }), 200
+        
+    except Exception as e:
+        print(f"Error checking membership status: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 if __name__ == '__main__':
