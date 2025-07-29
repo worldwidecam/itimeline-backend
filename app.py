@@ -598,6 +598,50 @@ class TimelineMember(db.Model):
         return self.role == 'SiteOwner'  # SiteOwner role is reserved for user ID 1
 
 
+class TimelineAction(db.Model):
+    """Model for storing timeline-specific action cards (Bronze/Silver/Gold)"""
+    __tablename__ = 'timeline_action'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    action_type = db.Column(db.String(20), nullable=False)  # 'bronze', 'silver', 'gold'
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    due_date = db.Column(db.DateTime, nullable=True)
+    threshold_type = db.Column(db.String(20), nullable=False, default='members')  # 'members', 'events', 'custom'
+    threshold_value = db.Column(db.Integer, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # Relationships
+    timeline = db.relationship('Timeline', backref=db.backref('actions', lazy=True))
+    creator = db.relationship('User', foreign_keys=[created_by])
+    
+    # Unique constraint to prevent duplicate action types per timeline
+    __table_args__ = (
+        db.UniqueConstraint('timeline_id', 'action_type', name='unique_timeline_action_type'),
+    )
+    
+    def to_dict(self):
+        """Convert action to dictionary for API responses"""
+        return {
+            'id': self.id,
+            'timeline_id': self.timeline_id,
+            'action_type': self.action_type,
+            'title': self.title,
+            'description': self.description,
+            'due_date': self.due_date.isoformat() if self.due_date else None,
+            'threshold_type': self.threshold_type,
+            'threshold_value': self.threshold_value,
+            'is_active': self.is_active,
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
 class EventTimelineAssociation(db.Model):
     __tablename__ = 'event_timeline_association'
     
@@ -3078,6 +3122,310 @@ def check_membership_status_new(timeline_id):
         
     except Exception as e:
         print(f"Error checking membership status: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+# =============================================================================
+# TIMELINE ACTION CARDS API ENDPOINTS
+# =============================================================================
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions', methods=['GET'])
+@jwt_required()
+def get_timeline_actions(timeline_id):
+    """Get all action cards for a timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Get all active actions for this timeline
+        actions = TimelineAction.query.filter_by(
+            timeline_id=timeline_id,
+            is_active=True
+        ).order_by(TimelineAction.action_type).all()
+        
+        # Convert to dictionary format
+        actions_data = [action.to_dict() for action in actions]
+        
+        return jsonify({
+            'actions': actions_data,
+            'timeline_id': timeline_id,
+            'total': len(actions_data)
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting timeline actions: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions', methods=['POST'])
+@jwt_required()
+def create_timeline_action(timeline_id):
+    """Create or update an action card for a timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user has admin permissions
+        if not (is_site_owner(user_id) or timeline.created_by == user_id):
+            # Check if user is admin/moderator
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_admin():
+                return jsonify({"error": "Admin permissions required"}), 403
+        
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # Validate required fields
+        required_fields = ['action_type', 'title']
+        for field in required_fields:
+            if field not in data or not data[field]:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        # Validate action_type
+        valid_types = ['bronze', 'silver', 'gold']
+        if data['action_type'] not in valid_types:
+            return jsonify({"error": f"Invalid action_type. Must be one of: {valid_types}"}), 400
+        
+        # Check if action already exists for this type
+        existing_action = TimelineAction.query.filter_by(
+            timeline_id=timeline_id,
+            action_type=data['action_type']
+        ).first()
+        
+        if existing_action:
+            # Update existing action
+            existing_action.title = data['title']
+            existing_action.description = data.get('description', '')
+            existing_action.threshold_type = data.get('threshold_type', 'members')
+            existing_action.threshold_value = data.get('threshold_value', 0)
+            existing_action.is_active = data.get('is_active', True)
+            existing_action.updated_at = datetime.now()
+            
+            # Handle due_date
+            if 'due_date' in data and data['due_date']:
+                try:
+                    existing_action.due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00'))
+                except ValueError:
+                    return jsonify({"error": "Invalid due_date format. Use ISO format."}), 400
+            else:
+                existing_action.due_date = None
+            
+            db.session.commit()
+            return jsonify({
+                'message': 'Action updated successfully',
+                'action': existing_action.to_dict()
+            }), 200
+        else:
+            # Create new action
+            new_action = TimelineAction(
+                timeline_id=timeline_id,
+                action_type=data['action_type'],
+                title=data['title'],
+                description=data.get('description', ''),
+                threshold_type=data.get('threshold_type', 'members'),
+                threshold_value=data.get('threshold_value', 0),
+                is_active=data.get('is_active', True),
+                created_by=user_id
+            )
+            
+            # Handle due_date
+            if 'due_date' in data and data['due_date']:
+                try:
+                    new_action.due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00'))
+                except ValueError:
+                    return jsonify({"error": "Invalid due_date format. Use ISO format."}), 400
+            
+            db.session.add(new_action)
+            db.session.commit()
+            
+            return jsonify({
+                'message': 'Action created successfully',
+                'action': new_action.to_dict()
+            }), 201
+        
+    except Exception as e:
+        print(f"Error creating/updating timeline action: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions/<int:action_id>', methods=['PUT'])
+@jwt_required()
+def update_timeline_action(timeline_id, action_id):
+    """Update a specific action card"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user has admin permissions
+        if not (is_site_owner(user_id) or timeline.created_by == user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_admin():
+                return jsonify({"error": "Admin permissions required"}), 403
+        
+        # Find the action
+        action = TimelineAction.query.filter_by(
+            id=action_id,
+            timeline_id=timeline_id
+        ).first()
+        
+        if not action:
+            return jsonify({"error": "Action not found"}), 404
+        
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # Update fields
+        if 'title' in data:
+            action.title = data['title']
+        if 'description' in data:
+            action.description = data['description']
+        if 'threshold_type' in data:
+            action.threshold_type = data['threshold_type']
+        if 'threshold_value' in data:
+            action.threshold_value = data['threshold_value']
+        if 'is_active' in data:
+            action.is_active = data['is_active']
+        
+        # Handle due_date
+        if 'due_date' in data:
+            if data['due_date']:
+                try:
+                    action.due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00'))
+                except ValueError:
+                    return jsonify({"error": "Invalid due_date format. Use ISO format."}), 400
+            else:
+                action.due_date = None
+        
+        action.updated_at = datetime.now()
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Action updated successfully',
+            'action': action.to_dict()
+        }), 200
+        
+    except Exception as e:
+        print(f"Error updating timeline action: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions/<int:action_id>', methods=['DELETE'])
+@jwt_required()
+def delete_timeline_action(timeline_id, action_id):
+    """Delete a specific action card"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user has admin permissions
+        if not (is_site_owner(user_id) or timeline.created_by == user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_admin():
+                return jsonify({"error": "Admin permissions required"}), 403
+        
+        # Find the action
+        action = TimelineAction.query.filter_by(
+            id=action_id,
+            timeline_id=timeline_id
+        ).first()
+        
+        if not action:
+            return jsonify({"error": "Action not found"}), 404
+        
+        # Soft delete by setting is_active to False
+        action.is_active = False
+        action.updated_at = datetime.now()
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Action deleted successfully'
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deleting timeline action: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions/<string:action_type>', methods=['GET'])
+@jwt_required()
+def get_timeline_action_by_type(timeline_id, action_type):
+    """Get a specific action card by type (bronze/silver/gold)"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Validate action_type
+        valid_types = ['bronze', 'silver', 'gold']
+        if action_type not in valid_types:
+            return jsonify({"error": f"Invalid action_type. Must be one of: {valid_types}"}), 400
+        
+        # Find the action
+        action = TimelineAction.query.filter_by(
+            timeline_id=timeline_id,
+            action_type=action_type,
+            is_active=True
+        ).first()
+        
+        if not action:
+            return jsonify({
+                'action': None,
+                'message': f'No {action_type} action found for this timeline'
+            }), 200
+        
+        return jsonify({
+            'action': action.to_dict()
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting timeline action by type: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 
