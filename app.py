@@ -2884,7 +2884,12 @@ def get_timeline_members_new(timeline_id):
         
         # Format response
         members = []
+        site_owner_found = False
+        
         for member in paginated.items:
+            if member.user_id == 1:  # Track if SiteOwner is already in the list
+                site_owner_found = True
+            
             members.append({
                 'id': member.id,
                 'user_id': member.user_id,
@@ -2896,9 +2901,54 @@ def get_timeline_members_new(timeline_id):
                 'is_active': member.is_active_member
             })
         
+        # Always ensure SiteOwner (User ID 1) is included in the member list
+        if not site_owner_found:
+            site_owner = User.query.get(1)
+            if site_owner:
+                # Check if SiteOwner has a membership record (even if inactive)
+                site_owner_membership = TimelineMember.query.filter_by(
+                    timeline_id=timeline_id,
+                    user_id=1
+                ).first()
+                
+                if site_owner_membership:
+                    # Use existing membership record but ensure it's active
+                    site_owner_membership.is_active_member = True
+                    site_owner_membership.role = 'siteowner'  # Ensure correct role
+                    db.session.commit()
+                    joined_at = site_owner_membership.joined_at
+                else:
+                    # Create membership record for SiteOwner
+                    site_owner_membership = TimelineMember(
+                        timeline_id=timeline_id,
+                        user_id=1,
+                        role='siteowner',
+                        is_active_member=True,
+                        joined_at=datetime.now()
+                    )
+                    db.session.add(site_owner_membership)
+                    db.session.commit()
+                    joined_at = site_owner_membership.joined_at
+                
+                # Add SiteOwner to the beginning of the member list (highest priority)
+                site_owner_data = {
+                    'id': site_owner_membership.id,
+                    'user_id': site_owner.id,
+                    'username': site_owner.username,
+                    'email': site_owner.email,
+                    'avatar_url': site_owner.avatar_url,
+                    'role': 'siteowner',
+                    'joined_at': joined_at.isoformat() if joined_at else None,
+                    'is_active': True
+                }
+                
+                # Insert SiteOwner at the beginning (highest priority)
+                members.insert(0, site_owner_data)
+                print(f"Added SiteOwner to member list for timeline {timeline_id}")
+        
         return jsonify({
             'members': members,
-            'total': paginated.total,
+            'total': len(members),  # Update total to reflect actual count including SiteOwner
             'page': page,
             'pages': paginated.pages,
             'has_next': paginated.has_next,
