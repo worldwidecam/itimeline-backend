@@ -237,7 +237,7 @@ jwt = JWTManager(app)
 from routes.upload import upload_bp
 from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
-from routes.community import community_bp
+# from routes.community import community_bp  # Temporarily commented out
 from routes.passport import passport_bp
 
 # Register blueprints
@@ -247,7 +247,7 @@ app.register_blueprint(media_bp, url_prefix='/api')
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(cloudinary_bp, url_prefix='/api')
 # Ensure CORS is applied to this blueprint
-app.register_blueprint(community_bp, url_prefix='/api/v1')
+# app.register_blueprint(community_bp, url_prefix='/api/v1')  # Temporarily commented out
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(passport_bp, url_prefix='/api/v1')
 
@@ -589,7 +589,11 @@ class TimelineMember(db.Model):
     )
     
     def is_admin(self):
-        return self.role == 'admin' or self.role == 'SiteOwner'
+        # Handle case-insensitive role comparison
+        if not self.role:
+            return False
+        role_lower = self.role.lower()
+        return role_lower == 'admin' or self.role == 'SiteOwner'
         
     def is_moderator(self):
         return self.role == 'moderator' or self.role == 'admin' or self.role == 'SiteOwner'  # Admins and SiteOwners have moderator powers
@@ -2842,7 +2846,11 @@ def get_current_user_id():
 
 def is_site_owner(user_id):
     """Check if user is the site owner (User ID 1)"""
-    return user_id == 1
+    # Handle both string and integer user_id from JWT
+    try:
+        return int(user_id) == 1
+    except (ValueError, TypeError):
+        return False
 
 def ensure_creator_membership(timeline_id, creator_id):
     """Ensure timeline creator has admin membership"""
@@ -3176,9 +3184,8 @@ def create_timeline_action(timeline_id):
         if not timeline:
             return jsonify({"error": "Timeline not found"}), 404
         
-        # Check if user has admin permissions
-        if not (is_site_owner(user_id) or timeline.created_by == user_id):
-            # Check if user is admin/moderator
+        # Check if user has admin permissions (SiteOwner or Admin role)
+        if not is_site_owner(user_id):
             membership = TimelineMember.query.filter_by(
                 timeline_id=timeline_id,
                 user_id=user_id,
