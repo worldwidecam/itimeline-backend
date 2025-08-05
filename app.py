@@ -3151,10 +3151,9 @@ def get_timeline_actions(timeline_id):
         if not timeline:
             return jsonify({"error": "Timeline not found"}), 404
         
-        # Get all active actions for this timeline
+        # Get all actions for this timeline (both active and inactive)
         actions = TimelineAction.query.filter_by(
-            timeline_id=timeline_id,
-            is_active=True
+            timeline_id=timeline_id
         ).order_by(TimelineAction.action_type).all()
         
         # Convert to dictionary format
@@ -3201,10 +3200,14 @@ def create_timeline_action(timeline_id):
             return jsonify({"error": "No data provided"}), 400
         
         # Validate required fields
-        required_fields = ['action_type', 'title']
-        for field in required_fields:
-            if field not in data or not data[field]:
-                return jsonify({"error": f"Missing required field: {field}"}), 400
+        # action_type is always required
+        if 'action_type' not in data or not data['action_type']:
+            return jsonify({"error": "Missing required field: action_type"}), 400
+        
+        # title is only required if the action is active
+        is_active = data.get('is_active', True)
+        if is_active and ('title' not in data or not data['title']):
+            return jsonify({"error": "Title is required for active action cards"}), 400
         
         # Validate action_type
         valid_types = ['bronze', 'silver', 'gold']
