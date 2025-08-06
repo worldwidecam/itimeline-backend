@@ -553,6 +553,8 @@ class Timeline(db.Model):
     timeline_type = db.Column(db.String(50), default='hashtag', nullable=False)  # Added timeline_type field
     visibility = db.Column(db.String(20), default='public', nullable=False)  # public or private
     privacy_changed_at = db.Column(db.DateTime, nullable=True)  # For tracking cooldown period
+    quote_text = db.Column(db.Text, nullable=True)  # Custom quote text for timeline
+    quote_author = db.Column(db.String(200), nullable=True)  # Custom quote author for timeline
     members = db.relationship('TimelineMember', backref='timeline', lazy=True)
     
     def is_community(self):
