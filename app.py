@@ -1800,13 +1800,26 @@ def get_timeline_v3(timeline_id):
         timeline_id = int(timeline_id)
     try:
         timeline = Timeline.query.get_or_404(timeline_id)
+        
+        # Handle potentially null or invalid created_at datetime
+        created_at_str = None
+        if timeline.created_at:
+            try:
+                created_at_str = timeline.created_at.isoformat()
+            except (AttributeError, ValueError) as dt_error:
+                print(f"Warning: Invalid created_at for timeline {timeline_id}: {dt_error}")
+                created_at_str = datetime.now().isoformat()  # Use current time as fallback
+        else:
+            created_at_str = datetime.now().isoformat()  # Use current time if None
+        
         return jsonify({
             'id': timeline.id,
             'name': timeline.name,
-            'description': timeline.description,
+            'description': timeline.description or '',
             'created_by': timeline.created_by,
-            'created_at': timeline.created_at.isoformat(),
-            'timeline_type': timeline.timeline_type
+            'created_at': created_at_str,
+            'timeline_type': timeline.timeline_type or 'hashtag',
+            'visibility': timeline.visibility or 'public'
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline: {str(e)}')
@@ -3436,6 +3449,114 @@ def get_timeline_action_by_type(timeline_id, action_type):
         
     except Exception as e:
         print(f"Error getting timeline action by type: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+# =============================================================================
+# TIMELINE QUOTE ENDPOINTS
+# =============================================================================
+
+@app.route('/api/v1/timelines/<int:timeline_id>/quote', methods=['GET'])
+@jwt_required()
+def get_timeline_quote(timeline_id):
+    """Get the custom quote for a timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user has access to this timeline
+        # For community timelines, check membership
+        if timeline.is_community():
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id, 
+                user_id=user_id
+            ).first()
+            
+            # Allow access if user is member, admin, or site owner
+            if not membership and not is_site_owner(user_id):
+                return jsonify({"error": "Access denied"}), 403
+        
+        # Return quote data (with defaults if not set)
+        quote_data = {
+            "text": timeline.quote_text or "Those who make Peaceful Revolution impossible, will make violent Revolution inevitable.",
+            "author": timeline.quote_author or "John F. Kennedy",
+            "is_custom": bool(timeline.quote_text)  # True if custom quote is set
+        }
+        
+        return jsonify({
+            "success": True,
+            "quote": quote_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting timeline quote: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/quote', methods=['PUT'])
+@jwt_required()
+def update_timeline_quote(timeline_id):
+    """Update the custom quote for a timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check if user has admin access to this timeline
+        if timeline.is_community():
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id, 
+                user_id=user_id
+            ).first()
+            
+            # Only allow admins or site owner to update quotes
+            if not (membership and membership.is_admin()) and not is_site_owner(user_id):
+                return jsonify({"error": "Admin access required"}), 403
+        else:
+            # For hashtag timelines, only creator or site owner can update
+            if timeline.created_by != user_id and not is_site_owner(user_id):
+                return jsonify({"error": "Only timeline creator can update quote"}), 403
+        
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # Validate and update quote fields
+        quote_text = data.get('text', '').strip()
+        quote_author = data.get('author', '').strip()
+        
+        # Allow empty strings to clear the custom quote (fall back to default)
+        timeline.quote_text = quote_text if quote_text else None
+        timeline.quote_author = quote_author if quote_author else None
+        
+        db.session.commit()
+        
+        # Return updated quote data
+        quote_data = {
+            "text": timeline.quote_text or "Those who make Peaceful Revolution impossible, will make violent Revolution inevitable.",
+            "author": timeline.quote_author or "John F. Kennedy",
+            "is_custom": bool(timeline.quote_text)
+        }
+        
+        return jsonify({
+            "success": True,
+            "message": "Quote updated successfully",
+            "quote": quote_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error updating timeline quote: {e}")
+        db.session.rollback()
         return jsonify({"error": "Internal server error"}), 500
 
 
