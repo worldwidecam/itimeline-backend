@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "username": "Brahdyssey",
+    "email": "brahdyssey@gmail.com",
+    "password_hash": "scrypt:32768:8:1$QBTrlURetXUmay5p$74e5e394e543f9eda4e2e5615ab5a4c961621baeb8be231fcc04e2cebd1be1c642573832e22d310d51f178a9fb1d5f0c0e1b3b729bdf983ee56e3870029b5720",
+    "created_at": "2025-05-22T10:06:07.215762",
+    "bio": "Help me. Help us. If you can",
+    "avatar_url": "https://res.cloudinary.com/dnjwvuxn7/image/upload/v1748214905/profile_avatars/xaq3igs5eciojpipcwgu.jpg"
+  },
+  {
+    "id": 2,
+    "username": "test",
+    "email": "mynameiscameronandirock@gmail.com",
+    "password_hash": "scrypt:32768:8:1$phX0VseJXKmW84Vr$a283f08e64b0df70e28c802fa692b2ca951b24342b668239784170ed14055fc308ea14c8a69d3337b79952696198e5107a2749a9d3e4a3030a0de92da9ba25bf",
+    "created_at": "2025-07-01T10:11:17.810486",
+    "bio": null,
+    "avatar_url": null
+  }
+]

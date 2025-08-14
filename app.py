@@ -28,6 +28,18 @@ from models import UserPassport
 import json
 from datetime import datetime
 
+# Import database models from external package
+try:
+    # Import the database package for utilities and configuration
+    import itimeline_db
+    from itimeline_db.config import DatabaseConfig
+    from itimeline_db.utils import DatabaseUtils
+    print("[SUCCESS] External database package imported successfully!")
+    EXTERNAL_DB_AVAILABLE = True
+except ImportError:
+    print("[WARNING] External database package not found. Continuing with Flask-SQLAlchemy.")
+    EXTERNAL_DB_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -218,7 +230,8 @@ def sync_user_passport():
 
 # Basic configurations
 app.config.update(
-    SQLALCHEMY_DATABASE_URI='sqlite:///timeline_forum.db',  # Using SQLite with Flask's instance_path
+    # Database Configuration - PostgreSQL Support (migrated from SQLite)
+    SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL', 'postgresql://postgres:death2therich@localhost:5432/itimeline_test'),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     JWT_SECRET_KEY=os.getenv('JWT_SECRET_KEY', 'your-secret-key'),  # Change this in production
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=4),  # Increased from 1 hour to 4 hours
@@ -518,7 +531,7 @@ def get_link_preview(url):
                 'url': url
             }
 
-# Models
+# Models (temporarily restored while we perfect the external package integration)
 class UserMusic(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), unique=True)
@@ -532,7 +545,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128))
+    password_hash = db.Column(db.String(255))
     created_at = db.Column(db.DateTime, default=datetime.now())
     bio = db.Column(db.Text, nullable=True)
     avatar_url = db.Column(db.String(200), nullable=True)
@@ -569,7 +582,6 @@ class Timeline(db.Model):
             return f"i-{self.name}"
         return f"#{self.name}"
 
-
 class TimelineMember(db.Model):
     __tablename__ = 'timeline_member'
     
@@ -602,7 +614,6 @@ class TimelineMember(db.Model):
         
     def is_site_owner(self):
         return self.role == 'SiteOwner'  # SiteOwner role is reserved for user ID 1
-
 
 class TimelineAction(db.Model):
     """Model for storing timeline-specific action cards (Bronze/Silver/Gold)"""
@@ -646,7 +657,6 @@ class TimelineAction(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
-
 
 class EventTimelineAssociation(db.Model):
     __tablename__ = 'event_timeline_association'

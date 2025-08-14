@@ -12,3 +12,6 @@ lxml==4.9.3
 Pillow==10.1.0
 gunicorn==21.2.0
 cloudinary==1.42.2
+
+# Local database package
+-e ../iTimeline-DB

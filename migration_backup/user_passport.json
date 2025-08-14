@@ -1,0 +1,22 @@
+[
+  {
+    "user_id": 1,
+    "memberships_json": "[{\"timeline_id\": 1, \"timeline_name\": \"TEST\", \"role\": \"admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-05 14:07:42.441270\", \"timeline_visibility\": \"public\", \"timeline_type\": \"hashtag\"}, {\"timeline_id\": 2, \"timeline_name\": \"NEWS\", \"role\": \"admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-05 14:07:42.441270\", \"timeline_visibility\": \"public\", \"timeline_type\": \"hashtag\"}, {\"timeline_id\": 3, \"timeline_name\": \"IMPATIENT\", \"role\": \"admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-05 14:07:42.442270\", \"timeline_visibility\": \"public\", \"timeline_type\": \"hashtag\"}, {\"timeline_id\": 4, \"timeline_name\": \"COMMUNITY TIMELINES\", \"role\": \"admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-05 14:07:42.442270\", \"timeline_visibility\": \"public\", \"timeline_type\": \"hashtag\"}, {\"timeline_id\": 5, \"timeline_name\": \"TIMELINE\", \"role\": \"Admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-05 14:06:12.533626\", \"timeline_visibility\": \"public\", \"timeline_type\": \"community\"}, {\"timeline_id\": 6, \"timeline_name\": \"COMMUNITY TEST\", \"role\": \"Admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-07 16:33:02.940688\", \"timeline_visibility\": \"public\", \"timeline_type\": \"community\"}, {\"timeline_id\": 7, \"timeline_name\": \"POINTLESS\", \"role\": \"Admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-06-07 16:33:02.940688\", \"timeline_visibility\": \"public\", \"timeline_type\": \"community\"}, {\"timeline_id\": 8, \"timeline_name\": \"MEMBERSHIP TEST\", \"role\": \"admin\", \"is_active_member\": true, \"isMember\": true, \"joined_at\": \"2025-07-03 09:17:09.292342\", \"timeline_visibility\": \"public\", \"timeline_type\": \"community\"}]",
+    "last_updated": "2025-07-07T17:57:31.442633"
+  },
+  {
+    "user_id": 2,
+    "memberships_json": "[]",
+    "last_updated": "2025-07-07T16:18:17.428546"
+  },
+  {
+    "user_id": 3,
+    "memberships_json": "[]",
+    "last_updated": "2025-07-06 10:38:40.713992"
+  },
+  {
+    "user_id": 4,
+    "memberships_json": "[]",
+    "last_updated": "2025-07-06 10:38:40.713992"
+  }
+]

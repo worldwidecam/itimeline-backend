@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "timeline_id": 5,
+    "action_type": "bronze",
+    "title": "",
+    "description": "",
+    "due_date": null,
+    "threshold_type": "members",
+    "threshold_value": 5,
+    "is_active": 0,
+    "created_by": 1,
+    "created_at": "2025-08-05T07:20:30.222711",
+    "updated_at": "2025-08-06T07:23:07.178144"
+  },
+  {
+    "id": 2,
+    "timeline_id": 5,
+    "action_type": "silver",
+    "title": "",
+    "description": "",
+    "due_date": null,
+    "threshold_type": "members",
+    "threshold_value": 10,
+    "is_active": 0,
+    "created_by": 1,
+    "created_at": "2025-08-05T07:44:01.516090",
+    "updated_at": "2025-08-06T07:23:07.447014"
+  },
+  {
+    "id": 3,
+    "timeline_id": 5,
+    "action_type": "gold",
+    "title": "",
+    "description": "",
+    "due_date": null,
+    "threshold_type": "members",
+    "threshold_value": 15,
+    "is_active": 0,
+    "created_by": 1,
+    "created_at": "2025-08-05T09:10:05.480116",
+    "updated_at": "2025-08-06T07:23:07.491619"
+  }
+]

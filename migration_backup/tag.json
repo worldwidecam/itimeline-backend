@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "name": "test",
+    "created_at": "2025-05-22T10:25:42.376343",
+    "timeline_id": 1
+  },
+  {
+    "id": 2,
+    "name": "news",
+    "created_at": "2025-05-23T08:31:11.781626",
+    "timeline_id": 2
+  },
+  {
+    "id": 3,
+    "name": "impatient",
+    "created_at": "2025-05-25T16:46:08.471857",
+    "timeline_id": 3
+  },
+  {
+    "id": 4,
+    "name": "community timelines",
+    "created_at": "2025-06-05T10:49:52.211580",
+    "timeline_id": 4
+  },
+  {
+    "id": 5,
+    "name": "timeline",
+    "created_at": "2025-06-06T08:23:06.777292",
+    "timeline_id": 5
+  },
+  {
+    "id": 6,
+    "name": "community test",
+    "created_at": "2025-06-07T17:08:46.622008",
+    "timeline_id": 6
+  },
+  {
+    "id": 7,
+    "name": "pointless",
+    "created_at": "2025-06-07T17:33:13.741966",
+    "timeline_id": 7
+  }
+]
