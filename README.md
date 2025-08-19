@@ -181,7 +181,9 @@ This repository contains only the backend code for the iTimeline application. Th
 
 ## Deployment
 
-The application is configured for deployment on Render.com with the following setup:
+> **⚠️ IMPORTANT CAUTION**: While the application is configured for future deployment on Render.com, this is NOT the current focus. All development should prioritize local PostgreSQL functionality. Do not make changes specifically for Render.com deployment without explicit approval, as we are not yet ready for this step. Treat any Render.com specific configurations as cautionary and future-oriented.
+
+The application is configured for future deployment on Render.com with the following setup:
 
 1. **Web Service**:
    - Build Command: `./build.sh`
