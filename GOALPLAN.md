@@ -1,5 +1,16 @@
 # iTimeline User Passport Implementation - Goal Plan
 
+## Concise Status (2025-08-22)
+- **What we're working on**: Backend support for Community timelines via the Passport system
+- **Finished**: UserPassport model, table, and endpoints
+  - `GET /api/v1/user/passport`, `POST /api/v1/user/passport/sync` registered in `app.py`
+- **Where we left off**: Harden logging/error handling and verify sync after membership changes
+- **Today's frontend-driven task**: Support AdminPanel "Remove from community" by ensuring backend responses and passport sync behave as expected
+
+---
+
+## Detailed history (archive)
+
 ## Current Status (July 6, 2025)
 
 We have successfully implemented the initial version of the UserPassport system for membership persistence across devices and sessions. This system addresses the issue of membership data leakage between users and devices by storing membership data server-side in a user-specific passport.
