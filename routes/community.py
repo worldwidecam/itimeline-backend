@@ -48,71 +48,48 @@ def check_timeline_access(timeline_id, required_role=None):
         required_role: Minimum role required (None = any member, 'moderator', 'admin')
         
     Returns:
-        tuple: (timeline_dict, membership_dict, has_access)
+        tuple: (timeline, membership, has_access)
     """
     user_id = get_user_id()
     
-    # Use direct SQLite3 connection to avoid SQLAlchemy issues
-    conn = sqlite3.connect('timeline_forum.db')
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
     try:
-        # Get timeline information
-        cursor.execute('SELECT * FROM timeline WHERE id = ?', (timeline_id,))
-        timeline_row = cursor.fetchone()
-        if not timeline_row:
-            conn.close()
+        # Get timeline information using SQLAlchemy
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
             return None, None, False
-        
-        timeline = dict(timeline_row)
         
         # SiteOwner (user ID 1) always has access to any timeline
         if user_id == 1:
-            cursor.execute(
-                'SELECT * FROM timeline_member WHERE timeline_id = ? AND user_id = ?',
-                (timeline_id, user_id)
-            )
-            membership_row = cursor.fetchone()
-            membership = dict(membership_row) if membership_row else None
-            conn.close()
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id, user_id=user_id
+            ).first()
             return timeline, membership, True
         
-        # Check if user is a member of the timeline
-        cursor.execute(
-            'SELECT * FROM timeline_member WHERE timeline_id = ? AND user_id = ? AND is_active_member = 1',
-            (timeline_id, user_id)
-        )
-        membership_row = cursor.fetchone()
-        membership = dict(membership_row) if membership_row else None
+        # Check if user is an active member of the timeline
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id, 
+            user_id=user_id,
+            is_active_member=True
+        ).first()
+        
+        # If not a member, no access
+        if not membership:
+            return timeline, None, False
         
         # Check if user has the required role
-        if required_role and membership:
-            role_hierarchy = {'member': 1, 'moderator': 2, 'admin': 3}
-            user_role_level = role_hierarchy.get(membership['role'], 0)
+        if required_role:
+            role_hierarchy = {'member': 1, 'moderator': 2, 'admin': 3, 'SiteOwner': 4}
+            user_role_level = role_hierarchy.get(membership.role, 0)
             required_role_level = role_hierarchy.get(required_role, 0)
             has_access = user_role_level >= required_role_level
         else:
-            has_access = membership is not None
+            has_access = True
         
-        conn.close()
         return timeline, membership, has_access
         
     except Exception as e:
-        conn.close()
+        logger.error(f"Error checking timeline access: {str(e)}")
         raise e
-    
-    if not membership:
-        return timeline, None, False
-    
-    # Check role if required
-    if required_role == 'admin' and membership.role != 'admin' and membership.role != 'SiteOwner':
-        return timeline, membership, False
-    
-    if required_role == 'moderator' and not membership.is_moderator() and membership.role != 'SiteOwner':
-        return timeline, membership, False
-    
-    return timeline, membership, True
 
 # Routes
 @community_bp.route('/timelines/community', methods=['POST'])
@@ -168,43 +145,43 @@ def create_community_timeline():
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['GET'])
 @jwt_required()
 def get_timeline_members(timeline_id):
-    """Get all members of a timeline using direct SQLite3 queries"""
+    """Get all active members of a timeline using SQLAlchemy"""
     # Remove access control - allow anyone to view member lists
     user_id = get_user_id()
     
-    # Use direct SQLite3 connection to avoid SQLAlchemy issues
-    conn = sqlite3.connect('timeline_forum.db')
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
     try:
-        # Get all members with user information
-        cursor.execute("""
-            SELECT tm.*, u.username, u.email, u.avatar_url, u.bio
-            FROM timeline_member tm
-            JOIN user u ON tm.user_id = u.id
-            WHERE tm.timeline_id = ?
-            ORDER BY tm.joined_at ASC
-        """, (timeline_id,))
+        # Get timeline for later use
+        timeline = Timeline.query.get_or_404(timeline_id)
         
-        members_rows = cursor.fetchall()
+        # Get all active members with user information using SQLAlchemy
+        members = db.session.query(
+            TimelineMember, User
+        ).join(
+            User, TimelineMember.user_id == User.id
+        ).filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == True  # Only get active members
+        ).order_by(
+            TimelineMember.joined_at.asc()
+        ).all()
+        
         result = []
         
-        for row in members_rows:
+        for member, user in members:
             member_data = {
-                'id': row['id'],
-                'timeline_id': row['timeline_id'],
-                'user_id': row['user_id'],
-                'role': row['role'],
-                'is_active_member': bool(row['is_active_member']),
-                'joined_at': row['joined_at'],
-                'invited_by': row['invited_by'],
+                'id': member.id,
+                'timeline_id': member.timeline_id,
+                'user_id': member.user_id,
+                'role': member.role,
+                'is_active_member': bool(member.is_active_member),
+                'joined_at': member.joined_at.isoformat() if member.joined_at else None,
+                'invited_by': member.invited_by,
                 'user': {
-                    'id': row['user_id'],
-                    'username': row['username'],
-                    'email': row['email'],
-                    'avatar_url': row['avatar_url'],
-                    'bio': row['bio']
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'avatar_url': user.avatar_url,
+                    'bio': user.bio
                 }
             }
             result.append(member_data)
@@ -214,58 +191,55 @@ def get_timeline_members(timeline_id):
         
         # If Brahdyssey is not in the members list, add them with SiteOwner role
         if not brahdyssey_in_members:
-            cursor.execute('SELECT * FROM user WHERE id = 1')
-            brahdyssey_row = cursor.fetchone()
-            if brahdyssey_row:
+            brahdyssey_user = User.query.get(1)
+            if brahdyssey_user:
                 brahdyssey_data = {
                     'id': None,  # Virtual member, no database ID
                     'timeline_id': timeline_id,
                     'user_id': 1,
                     'role': 'SiteOwner',
                     'is_active_member': True,
-                    'joined_at': timeline['created_at'],
+                    'joined_at': timeline.created_at.isoformat() if timeline.created_at else None,
                     'invited_by': None,
                     'user': {
                         'id': 1,
-                        'username': brahdyssey_row['username'],
-                        'email': brahdyssey_row['email'],
-                        'avatar_url': brahdyssey_row['avatar_url'],
-                        'bio': brahdyssey_row['bio']
+                        'username': brahdyssey_user.username,
+                        'email': brahdyssey_user.email,
+                        'avatar_url': brahdyssey_user.avatar_url,
+                        'bio': brahdyssey_user.bio
                     }
                 }
                 result.append(brahdyssey_data)
         
         # Check if the creator is already in the members list
-        creator_in_members = any(m['user_id'] == timeline['created_by'] for m in result)
+        creator_in_members = any(m['user_id'] == timeline.created_by for m in result)
         
         # If the creator is not in the members list and is not Brahdyssey, add them with Admin role
-        if not creator_in_members and timeline['created_by'] != 1:
-            cursor.execute('SELECT * FROM user WHERE id = ?', (timeline['created_by'],))
-            creator_row = cursor.fetchone()
-            if creator_row:
+        if not creator_in_members and timeline.created_by != 1:
+            creator_user = User.query.get(timeline.created_by)
+            if creator_user:
                 creator_data = {
                     'id': None,  # Virtual member, no database ID
                     'timeline_id': timeline_id,
-                    'user_id': timeline['created_by'],
-                    'role': 'Admin',
+                    'user_id': timeline.created_by,
+                    'role': 'admin',
                     'is_active_member': True,
-                    'joined_at': timeline['created_at'],
+                    'joined_at': timeline.created_at.isoformat() if timeline.created_at else None,
                     'invited_by': None,
                     'user': {
-                        'id': timeline['created_by'],
-                        'username': creator_row['username'],
-                        'email': creator_row['email'],
-                        'avatar_url': creator_row['avatar_url'],
-                        'bio': creator_row['bio']
+                        'id': timeline.created_by,
+                        'username': creator_user.username,
+                        'email': creator_user.email,
+                        'avatar_url': creator_user.avatar_url,
+                        'bio': creator_user.bio
                     }
                 }
                 result.append(creator_data)
         
-        conn.close()
         return jsonify(result), 200
         
     except Exception as e:
-        conn.close()
+        logger.error(f"Error getting timeline members: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['POST'])
@@ -327,26 +301,29 @@ def add_timeline_member(timeline_id):
 @community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>', methods=['DELETE'])
 @jwt_required()
 def remove_timeline_member(timeline_id, user_id):
-    """Remove a member from a timeline"""
+    """Remove a member from a timeline by setting is_active_member to false"""
+    current_user_id = get_user_id()
     timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
     
     if not has_access:
-        return jsonify({"error": "Access denied"}), 403
+        return jsonify({"error": "Access denied. You need moderator privileges to remove members."}), 403
     
     # Get the member to remove
     member = TimelineMember.query.filter_by(
         timeline_id=timeline_id, user_id=user_id
     ).first_or_404()
     
-    # Prevent removing the SiteOwner (user ID 1)
+    # Hierarchical permission checks
+    
+    # 1. Prevent removing the SiteOwner (user ID 1) by anyone
     if user_id == 1 or member.role == 'SiteOwner':
         return jsonify({"error": "Cannot remove the site owner from any timeline"}), 403
     
-    # Check permissions
+    # 2. Only admins can remove admins
     if member.role == 'admin' and membership.role != 'admin':
         return jsonify({"error": "Only admins can remove admins"}), 403
     
-    # Prevent removing the last admin
+    # 3. Prevent removing the last admin
     if member.role == 'admin':
         admin_count = TimelineMember.query.filter_by(
             timeline_id=timeline_id, role='admin'
@@ -355,11 +332,39 @@ def remove_timeline_member(timeline_id, user_id):
         if admin_count <= 1:
             return jsonify({"error": "Cannot remove the last admin"}), 400
     
-    # Remove member
-    db.session.delete(member)
-    db.session.commit()
+    # 4. Moderators can only remove regular members, not other moderators
+    if member.role == 'moderator' and membership.role == 'moderator':
+        return jsonify({"error": "Moderators cannot remove other moderators"}), 403
     
-    return jsonify({"message": "Member removed successfully"}), 200
+    # 5. Users cannot remove themselves (should use leave timeline endpoint instead)
+    if user_id == current_user_id:
+        return jsonify({"error": "Cannot remove yourself. Use the leave timeline feature instead."}), 400
+    
+    # Set member as inactive instead of deleting
+    member.is_active_member = False
+    
+    # Record the action in the database for audit purposes
+    try:
+        # Add a timeline action to track who removed the member
+        action = TimelineAction(
+            timeline_id=timeline_id,
+            user_id=current_user_id,
+            action_type='member_removed',
+            target_user_id=user_id,
+            details=f"User {user_id} removed from timeline by user {current_user_id}",
+            created_at=datetime.now()
+        )
+        db.session.add(action)
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Member removed successfully",
+            "removed_user_id": user_id,
+            "removed_by": current_user_id
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error removing member: {str(e)}"}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/role', methods=['PUT'])
 @jwt_required()
@@ -519,7 +524,23 @@ def check_membership_status(timeline_id):
     # Check if user is the creator of this timeline
     timeline = Timeline.query.get_or_404(timeline_id)
     if timeline.created_by == user_id:
-        # Creator is always an admin member
+        # Check if creator is still an active member
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        # If creator was removed, they need to rejoin
+        if membership and not membership.is_active_member:
+            return jsonify({
+                "is_member": False,
+                "role": None,
+                "timeline_visibility": timeline.visibility,
+                "is_creator": True,
+                "was_removed": True
+            }), 200
+        
+        # Creator is an admin member if active
         return jsonify({
             "is_member": True,
             "role": "admin",
@@ -535,10 +556,14 @@ def check_membership_status(timeline_id):
             user_id=user_id
         ).first()
         
+        # Explicitly check is_active_member flag
+        is_active = bool(membership and membership.is_active_member)
+        
         return jsonify({
-            "is_member": bool(membership and membership.is_active_member),
-            "role": membership.role if membership else None,
-            "timeline_visibility": timeline.visibility
+            "is_member": is_active,
+            "role": membership.role if (membership and is_active) else None,
+            "timeline_visibility": timeline.visibility,
+            "was_removed": bool(membership and not membership.is_active_member)
         }), 200
         
     except Exception as e:
@@ -790,6 +815,131 @@ def get_shared_events(timeline_id):
     
     result = associations_schema.dump(associations)
     return jsonify(result), 200
+
+@community_bp.route('/timelines/<int:timeline_id>/blocked-members', methods=['GET'])
+@jwt_required()
+def get_blocked_members(timeline_id):
+    """Get all blocked (inactive) members of a timeline"""
+    # Check if user has access to view blocked members (admin or moderator)
+    timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
+    
+    if not has_access:
+        return jsonify({"error": "Access denied. You need moderator privileges to view blocked members."}), 403
+    
+    try:
+        # Get all inactive members with user information using SQLAlchemy
+        blocked_members = db.session.query(
+            TimelineMember, User
+        ).join(
+            User, TimelineMember.user_id == User.id
+        ).filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == False  # Only get inactive members
+        ).order_by(
+            TimelineMember.joined_at.desc()  # Most recently blocked first
+        ).all()
+        
+        result = []
+        
+        for member, user in blocked_members:
+            # Get the action that blocked this member (if available)
+            block_action = TimelineAction.query.filter_by(
+                timeline_id=timeline_id,
+                target_user_id=member.user_id,
+                action_type='member_removed'
+            ).order_by(TimelineAction.created_at.desc()).first()
+            
+            blocked_date = block_action.created_at if block_action else member.joined_at
+            blocked_by = block_action.user_id if block_action else None
+            reason = block_action.details if block_action else "Removed by administrator"
+            
+            member_data = {
+                'id': member.id,
+                'timeline_id': member.timeline_id,
+                'user_id': member.user_id,
+                'role': member.role,
+                'joined_at': member.joined_at.isoformat() if member.joined_at else None,
+                'blocked_date': blocked_date.isoformat() if blocked_date else None,
+                'blocked_by': blocked_by,
+                'reason': reason,
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'avatar_url': user.avatar_url,
+                    'bio': user.bio
+                }
+            }
+            result.append(member_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting blocked members: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@community_bp.route('/timelines/<int:timeline_id>/reported-posts', methods=['GET'])
+@jwt_required()
+def get_reported_posts(timeline_id):
+    """Get all reported posts for a timeline using TimelineAction model"""
+    # Check if user has access to view reported posts (admin or moderator)
+    timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
+    
+    if not has_access:
+        return jsonify({"error": "Access denied. You need moderator privileges to view reported posts."}), 403
+    
+    try:
+        # Get all post report actions
+        report_actions = TimelineAction.query.filter_by(
+            timeline_id=timeline_id,
+            action_type='post_reported'
+        ).order_by(TimelineAction.created_at.desc()).all()
+        
+        result = []
+        
+        for action in report_actions:
+            # Try to get the post and related users
+            try:
+                post_id = action.target_post_id
+                if not post_id:
+                    continue
+                    
+                post = Post.query.get(post_id)
+                if not post:
+                    continue
+                    
+                reporter = User.query.get(action.user_id)
+                author = User.query.get(post.created_by)
+                
+                post_data = {
+                    'id': post.id,
+                    'timeline_id': post.timeline_id,
+                    'content': post.content,
+                    'title': post.title,
+                    'created_at': post.created_at.isoformat() if post.created_at else None,
+                    'reported_at': action.created_at.isoformat() if action.created_at else None,
+                    'report_reason': action.details or 'Reported as inappropriate',
+                    'author': {
+                        'id': author.id if author else None,
+                        'username': author.username if author else 'Deleted User',
+                        'avatar_url': author.avatar_url if author else None
+                    },
+                    'reporter': {
+                        'id': reporter.id if reporter else None,
+                        'username': reporter.username if reporter else 'Unknown User',
+                        'avatar_url': reporter.avatar_url if reporter else None
+                    }
+                }
+                result.append(post_data)
+            except Exception as inner_e:
+                logger.error(f"Error processing reported post {action.target_post_id}: {str(inner_e)}")
+                continue
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting reported posts: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 # Blueprint is registered in app.py
 # Do not register here to avoid circular imports

@@ -1,5 +1,5 @@
 # iTimeline Backend
-(8.14.25 - currently in the process of migrating to postgres.)
+(2025-08-22 – PostgreSQL migration complete; PostgreSQL is the default for local development and production.)
 Backend server for the iTimeline application, a modern web application for creating and sharing timelines with interactive event cards.
 
 ## Important Configuration Notes
@@ -71,7 +71,7 @@ cors = CORS(
      - Private timelines: Requires approval from admins
      - Status is cached in localStorage with 30-minute expiration
 - **Cross-Device Membership Persistence**: Maintains consistent timeline membership status across multiple devices and sessions
-- **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table in `instance/timeline_forum.db`
+- **Server-Side Storage**: Stores user membership data in a dedicated `user_passport` table in the PostgreSQL database (via SQLAlchemy models)
 - **User-Specific Caching**: Frontend caches passport data with consistent localStorage key format: `timeline_membership_${timelineId}`
 - **Automatic Synchronization**: Passport syncs with backend after membership changes
 - **Special Role Recognition**: Automatically recognizes timeline creators and site owners as members
@@ -93,7 +93,7 @@ cors = CORS(
 ## Technical Stack
 
 - **Framework**: Flask (Python)
-- **Database**: SQLAlchemy with SQLite (PostgreSQL in production)
+- **Database**: SQLAlchemy with PostgreSQL (default for local development and production)
 - **Authentication**: Flask-JWT-Extended
 - **File Storage**: Cloudinary cloud storage
 - **File Uploads**: Flask's built-in file handling
@@ -162,10 +162,14 @@ This repository contains only the backend code for the iTimeline application. Th
    export CLOUDINARY_API_SECRET=your_api_secret
    ```
 
-5. Initialize the database:
-   ```
-   python init_db.py
-   ```
+5. Configure database connection (PostgreSQL):
+   - Set `DATABASE_URL` for local dev (defaults to local Postgres if unset):
+     ```bash
+     # Example local connection string
+     set DATABASE_URL=postgresql://postgres:death2therich@localhost:5432/itimeline_test  # Windows (PowerShell use $env:DATABASE_URL)
+     export DATABASE_URL=postgresql://postgres:death2therich@localhost:5432/itimeline_test # macOS/Linux
+     ```
+   - Tables are created automatically on app start via SQLAlchemy. No SQLite file is used.
 
 6. Run the development server:
    ```
@@ -250,42 +254,37 @@ To enable API documentation on your Render deployment:
 
 ## API Endpoints
 
-The backend provides the following API endpoints:
+The lists below reflect what is currently active in this codebase and what is the documented standard moving forward.
 
-### Authentication
-- **POST /api/auth/register**: Register a new user
-- **POST /api/auth/login**: Log in an existing user
-- **POST /api/auth/logout**: Log out the current user
+### Active (confirmed in code)
+- **Passport**
+  - `GET /api/v1/user/passport` — Fetch user's membership passport (see `app.py`)
+  - `POST /api/v1/user/passport/sync` — Sync passport data (see `app.py`)
 
-### Timelines
-- **GET /api/v1/timelines**: Get all timelines
-- **POST /api/v1/timelines**: Create a new timeline
-- **GET /api/v1/timelines/{id}**: Get a specific timeline
-- **PUT /api/v1/timelines/{id}**: Update a timeline
-- **DELETE /api/v1/timelines/{id}**: Delete a timeline
+- **Uploads (Legacy path prefix)**
+  - `POST /api/upload` — Generic upload (see `routes/upload.py` via `upload_bp`)
+  - `POST /api/upload-media` — Media upload (see `routes/upload.py`)
 
-### Events
-- **GET /api/v1/events**: Get all events
-- **POST /api/v1/events**: Create a new event
-- **GET /api/v1/events/{id}**: Get a specific event
-- **PUT /api/v1/events/{id}**: Update an event
-- **DELETE /api/v1/events/{id}**: Delete an event
+- **Media Listing (Legacy path prefix)**
+  - `GET /api/media-files` — Media listing (see `routes/media.py`)
+  - `GET /api/cloudinary/audio-files` — Cloudinary audio listing (see `routes/cloudinary.py`)
 
-### Community Features
-- **GET /api/v1/timelines/{timelineId}/membership-status**: Check membership status for a timeline
-- **POST /api/v1/timelines/{timelineId}/access-requests**: Request to join a timeline
-- **GET /api/v1/user/passport**: Get user's membership passport
-- **POST /api/v1/user/passport/sync**: Sync user's membership data
+### Documented Standard (`/api/v1`)
+- All new endpoints should use `/api/v1/...`.
+- Community and membership features are standardized under `/api/v1/membership/...`.
+- Frontend docs list the canonical membership endpoints for client usage.
 
-### File Uploads
-- **POST /api/upload**: Upload a file
-- **GET /api/uploads/{filename}**: Serve a file
+> Note: Some legacy endpoints still use `/api` (without version). They remain operational during the transition but are not recommended for new integrations.
 
-> **IMPORTANT**: The API endpoints listed in previous documentation without the `/api/v1` prefix are incorrect and should not be used. All community-related endpoints must use the `/api/v1` prefix.
+### Serving Uploaded Files
+- `GET /uploads/{filename}` — Serve uploaded files
+- `GET /static/uploads/{filename}` — Serve uploaded files from static path
 
 ## Troubleshooting
 
-- **Database Issues**: If you encounter database errors, try running `python reset_db.py` to reset the database
+- **Database Issues**: Ensure the app is using PostgreSQL.
+  - Verify `DATABASE_URL` is set to your local PostgreSQL (e.g., `postgresql://postgres:death2therich@localhost:5432/itimeline_test`).
+  - If needed, use the migration utilities in the `iTimeline-DB` package (e.g., migrate/reset/fix sequences).
 - **File Upload Issues**: Check Cloudinary credentials and connectivity
 - **CORS Issues**: Ensure the frontend URL is correctly set in the CORS configuration
 - **Membership Persistence Issues**: Run `python fix_passport_sync.py` to synchronize all user passports with their actual membership data
@@ -294,7 +293,7 @@ The backend provides the following API endpoints:
 
 If users experience issues with their membership status not persisting across sessions:
 
-1. **Verify Database Path**: Ensure the backend is connecting to the correct database file at `instance/timeline_forum.db`
+1. **Verify Database Connection**: Ensure the backend is connecting to PostgreSQL via `DATABASE_URL` (SQLite file paths are legacy and no longer used)
 2. **Check Passport Blueprint Registration**: Verify that `passport_bp` is registered in `app.py` with the prefix `/api/v1`
 3. **Verify CORS Configuration**: Ensure CORS is properly configured to allow requests from the frontend
 4. **Sync User Passports**: Run `python fix_passport_sync.py` to update all user passports with their complete membership data
@@ -302,11 +301,19 @@ If users experience issues with their membership status not persisting across se
 
 ## Known Issues
 
-### Incorrect Database Path
+### Legacy SQLite Path (Deprecated)
 
-**Issue Description**: Some parts of the application may incorrectly reference the database file at the root path `timeline_forum.db` instead of the correct path `instance/timeline_forum.db`.
+**Context**: Earlier versions referenced a local SQLite file path (e.g., `instance/timeline_forum.db`). The application now uses PostgreSQL for all environments.
 
-**Resolution**: We've updated critical components to use the correct database path, but there may still be some code that references the incorrect path. If you encounter database-related issues, check the database path being used.
+**Action**: If you encounter references to SQLite paths, treat them as legacy notes. Ensure `DATABASE_URL` is configured and PostgreSQL is running.
+
+### API Deprecation Policy
+
+- **Deprecated**: Old, still-working endpoints or flows that will be removed in a future release.
+- **Current Deprecated Items**:
+  - Endpoints without `/api/v1`, including `/api/upload`, `/api/upload-media`, `/api/media-files`, and `/api/cloudinary/audio-files`.
+  - Any `'/timelines/...'` routes without a version prefix.
+- **Guidance**: Do not add new dependencies to deprecated endpoints. Prefer `/api/v1/...` routes. Migration work will consolidate all public APIs under `/api/v1`.
 
 ### Membership Persistence
 
