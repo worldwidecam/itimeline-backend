@@ -2,10 +2,27 @@
 
 ## Concise Status (2025-08-22)
 - **What we're working on**: Backend support for Community timelines via the Passport system
-- **Finished**: UserPassport model, table, and endpoints
-  - `GET /api/v1/user/passport`, `POST /api/v1/user/passport/sync` registered in `app.py`
+- **Finished**: UserPassport model, table, and endpoints (now using Postgres via SQLAlchemy engine)
+  - `GET /api/v1/user/passport` and `POST /api/v1/user/passport/sync` refactored to Postgres (no sqlite3)
+  - Servers started locally; endpoints respond and write to `user_passport`
 - **Where we left off**: Harden logging/error handling and verify sync after membership changes
 - **Today's frontend-driven task**: Support AdminPanel "Remove from community" by ensuring backend responses and passport sync behave as expected
+
+### Progress Today (Postgres alignment)
+- **Backend**: Removed sqlite in passport routes; now use `db.engine.begin()` + `text()` with Postgres, `ON CONFLICT` upsert for `user_passport`
+- **Runtime**: Backend runs against local Postgres via `DATABASE_URL`; frontend Vite dev server running and hitting backend
+
+### Next Minute Step — Remove Button Path
+1) **Enable the active DELETE route under `/api/v1`**
+   - Register `routes/community.py` blueprint (`community_bp`) in `app.py` with `url_prefix='/api/v1'` so `DELETE /api/v1/timelines/<timeline_id>/members/<user_id>` is live.
+   - Confirm the route performs soft-delete: `timeline_member.is_active_member = FALSE` with proper permission checks.
+2) **On successful DELETE**: Ensure client (or server) triggers `POST /api/v1/user/passport/sync` to persist the change.
+
+Mini-roadmap after this minute step:
+- [ ] Add log lines in DELETE handler to confirm update counts and acting/admin user
+- [ ] Verify `GET /api/v1/membership/timelines/{id}/members` excludes inactive members
+- [ ] Add a tiny E2E check: remove → sync → reload → member stays removed
+- [ ] Later: consider emitting passport sync server-side within the same transaction
 
 ---
 
