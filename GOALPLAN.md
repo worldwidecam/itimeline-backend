@@ -9,6 +9,26 @@
 
 ---
 
+## Community Admin "Remove from community" — Findings (Quarantine Mode)
+
+- **Frontend call path**: `src/components/timeline-v3/community/AdminPanel.js` → `handleRemoveMember()` → `removeMember(timelineId, userId)` in `src/utils/api.js`.
+- **DELETE endpoint used by frontend**: `/api/v1/timelines/{timelineId}/members/{userId}`.
+- **Backend implementation location**: `routes/community.py` defines `@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>', methods=['DELETE'])` which performs a soft delete (`is_active_member = False`) with permission checks.
+- **Critical issue**: `community_bp` is currently NOT registered in `app.py`:
+  - Import commented: `# from routes.community import community_bp`
+  - Registration commented: `# app.register_blueprint(community_bp, url_prefix='/api/v1')`
+- **Resulting mismatch**:
+  - Member listing uses active routes in `app.py`: `GET /api/v1/membership/timelines/{id}/members` (works).
+  - Removal uses unregistered blueprint route under `/api/v1/timelines/...` (likely 404/401), so the button appears to work in UI (optimistic state + cache clears) but does not persist server-side.
+- **Caching/state notes**: After DELETE attempt, UI filters member locally and clears `timeline_*` and `user_passport_*` keys, but a full reload restores the member since backend didn’t persist removal.
+
+### Decision Point (Next Step after Restart)
+
+- **Action**: Review these findings and decide one path:
+  1) Keep current button flow and enable/fix backend endpoint registration for `community_bp` under `/api/v1` to activate DELETE/role/blocked routes.
+  2) Redesign button to target the already-active "new clean" membership routes (align remove with `/api/v1/membership/...`) and deprecate old `/api/v1/timelines/...` paths.
+- We will not implement changes until the decision is made; this GOALPLAN serves as the guide for that review.
+
 ## Detailed history (archive)
 
 ## Current Status (July 6, 2025)
