@@ -9,14 +9,19 @@ This module contains all routes related to community timelines, including:
 """
 
 from flask import Blueprint, request, jsonify, current_app
+from flask_cors import cross_origin
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from marshmallow import ValidationError
 import sqlite3
+import logging
 
 # Create blueprint first, before any circular imports can happen
 community_bp = Blueprint('community', __name__)
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 # Import schemas only - models will be imported inside route functions
 from api_docs import (
@@ -50,6 +55,8 @@ def check_timeline_access(timeline_id, required_role=None):
     Returns:
         tuple: (timeline, membership, has_access)
     """
+    # Local imports to avoid circular import issues
+    from app import Timeline, TimelineMember
     user_id = get_user_id()
     
     try:
@@ -299,64 +306,115 @@ def add_timeline_member(timeline_id):
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>', methods=['DELETE'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['DELETE', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
 @jwt_required()
 def remove_timeline_member(timeline_id, user_id):
-    """Remove a member from a timeline by setting is_active_member to false"""
-    current_user_id = get_user_id()
-    timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
-    
-    if not has_access:
-        return jsonify({"error": "Access denied. You need moderator privileges to remove members."}), 403
-    
-    # Get the member to remove
-    member = TimelineMember.query.filter_by(
-        timeline_id=timeline_id, user_id=user_id
-    ).first_or_404()
-    
-    # Hierarchical permission checks
-    
-    # 1. Prevent removing the SiteOwner (user ID 1) by anyone
-    if user_id == 1 or member.role == 'SiteOwner':
-        return jsonify({"error": "Cannot remove the site owner from any timeline"}), 403
-    
-    # 2. Only admins can remove admins
-    if member.role == 'admin' and membership.role != 'admin':
-        return jsonify({"error": "Only admins can remove admins"}), 403
-    
-    # 3. Prevent removing the last admin
-    if member.role == 'admin':
-        admin_count = TimelineMember.query.filter_by(
-            timeline_id=timeline_id, role='admin'
-        ).count()
-        
-        if admin_count <= 1:
-            return jsonify({"error": "Cannot remove the last admin"}), 400
-    
-    # 4. Moderators can only remove regular members, not other moderators
-    if member.role == 'moderator' and membership.role == 'moderator':
-        return jsonify({"error": "Moderators cannot remove other moderators"}), 403
-    
-    # 5. Users cannot remove themselves (should use leave timeline endpoint instead)
-    if user_id == current_user_id:
-        return jsonify({"error": "Cannot remove yourself. Use the leave timeline feature instead."}), 400
-    
-    # Set member as inactive instead of deleting
-    member.is_active_member = False
-    
-    # Record the action in the database for audit purposes
+    # Local imports to avoid circular import with app.py
+    from app import db
+    from sqlalchemy import text
+    """Remove a member from a timeline by setting is_active_member to false (raw SQL path)"""
     try:
-        # Add a timeline action to track who removed the member
-        action = TimelineAction(
-            timeline_id=timeline_id,
-            user_id=current_user_id,
-            action_type='member_removed',
-            target_user_id=user_id,
-            details=f"User {user_id} removed from timeline by user {current_user_id}",
-            created_at=datetime.now()
+        current_user_id = get_user_id()
+
+        # Validate timeline exists and get creator
+        timeline_row = db.session.execute(
+            text("SELECT id, created_by FROM timeline WHERE id = :tid"),
+            {"tid": timeline_id}
+        ).mappings().first()
+        if not timeline_row:
+            return jsonify({"error": "Timeline not found"}), 404
+
+        # Get current user's membership (active only)
+        curr_mem = db.session.execute(
+            text(
+                """
+                SELECT role FROM timeline_member
+                WHERE timeline_id = :tid AND user_id = :uid AND is_active_member = TRUE
+                """
+            ),
+            {"tid": timeline_id, "uid": current_user_id}
+        ).mappings().first()
+
+        # Determine access: SiteOwner (1), timeline creator, or moderator/admin
+        has_access = False
+        curr_role = curr_mem["role"].lower() if curr_mem and curr_mem.get("role") else None
+        if int(current_user_id) == 1:
+            has_access = True
+            curr_role = "SiteOwner"
+        elif timeline_row["created_by"] == int(current_user_id):
+            has_access = True
+            curr_role = curr_role or "admin"
+        elif curr_role in ("admin", "moderator"):
+            has_access = True
+
+        if not has_access:
+            return jsonify({"error": "Access denied. You need moderator privileges to remove members."}), 403
+
+        # Get target member to remove
+        target_mem = db.session.execute(
+            text(
+                """
+                SELECT id, user_id, role, is_active_member
+                FROM timeline_member
+                WHERE timeline_id = :tid AND user_id = :uid
+                """
+            ),
+            {"tid": timeline_id, "uid": user_id}
+        ).mappings().first()
+
+        if not target_mem:
+            return jsonify({"error": "Member not found"}), 404
+
+        target_role = target_mem["role"]
+
+        # Permission rules
+        if int(user_id) == 1 or target_role == "SiteOwner":
+            return jsonify({"error": "Cannot remove the site owner from any timeline"}), 403
+
+        if target_role == "admin" and curr_role != "admin" and int(current_user_id) != 1 and timeline_row["created_by"] != int(current_user_id):
+            return jsonify({"error": "Only admins can remove admins"}), 403
+
+        if target_role == "admin":
+            admin_count = db.session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS c FROM timeline_member
+                    WHERE timeline_id = :tid AND role = 'admin' AND is_active_member = TRUE
+                    """
+                ),
+                {"tid": timeline_id}
+            ).scalar()
+            if (admin_count or 0) <= 1:
+                return jsonify({"error": "Cannot remove the last admin"}), 400
+
+        if target_role == "moderator" and curr_role == "moderator":
+            return jsonify({"error": "Moderators cannot remove other moderators"}), 403
+
+        if int(user_id) == int(current_user_id):
+            return jsonify({"error": "Cannot remove yourself. Use the leave timeline feature instead."}), 400
+
+        # Perform soft remove
+        db.session.execute(
+            text(
+                """
+                UPDATE timeline_member
+                SET is_active_member = FALSE
+                WHERE timeline_id = :tid AND user_id = :uid
+                """
+            ),
+            {"tid": timeline_id, "uid": user_id}
         )
-        db.session.add(action)
         db.session.commit()
-        
         return jsonify({
             "message": "Member removed successfully",
             "removed_user_id": user_id,

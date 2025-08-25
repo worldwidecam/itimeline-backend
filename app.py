@@ -59,12 +59,15 @@ allowed_origins = [
     'http://localhost:5000'
 ]
 
-# Enable CORS with simple configuration
-cors = CORS(app, 
-           origins=['*'],  # Allow all origins for debugging
-           methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-           allow_headers=['*'],  # Allow all headers
-           supports_credentials=True)
+# Enable CORS – reflect specific allowed origins when using credentials
+# Using '*' with supports_credentials=True will omit the header and cause browser CORS failures
+cors = CORS(
+    app,
+    origins=allowed_origins,
+    methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
 
 print(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
 
@@ -240,7 +243,7 @@ jwt = JWTManager(app)
 from routes.upload import upload_bp
 from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
-# from routes.community import community_bp  # Temporarily commented out
+from routes.community import community_bp  # Re-enabled community blueprint
 from routes.passport import passport_bp
 
 # Register blueprints
@@ -250,7 +253,7 @@ app.register_blueprint(media_bp, url_prefix='/api')
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(cloudinary_bp, url_prefix='/api')
 # Ensure CORS is applied to this blueprint
-# app.register_blueprint(community_bp, url_prefix='/api/v1')  # Temporarily commented out
+app.register_blueprint(community_bp, url_prefix='/api/v1')  # Register community routes
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(passport_bp, url_prefix='/api/v1')
 
