@@ -1,12 +1,13 @@
 # iTimeline User Passport Implementation - Goal Plan
 
-## Concise Status (2025-08-22)
-- **What we're working on**: Backend support for Community timelines via the Passport system
-- **Finished**: UserPassport model, table, and endpoints (now using Postgres via SQLAlchemy engine)
-  - `GET /api/v1/user/passport` and `POST /api/v1/user/passport/sync` refactored to Postgres (no sqlite3)
-  - Servers started locally; endpoints respond and write to `user_passport`
-- **Where we left off**: Harden logging/error handling and verify sync after membership changes
-- **Today's frontend-driven task**: Support AdminPanel "Remove from community" by ensuring backend responses and passport sync behave as expected
+## Concise Status (2025-08-28)
+- **What we're working on**: Community timeline admin actions and User Passport stability
+- **Finished**: UserPassport model/table; community blueprint registered in `app.py`; admin/member routes active
+- **Current problems**:
+  - 403 on `GET /api/v1/timelines/5/blocked-members` when using a non-admin member (user_id=2). Access requires moderator/admin/creator or SiteOwner per `check_timeline_access()` in `routes/community.py`.
+  - 500 on `GET /api/v1/user/passport`. Two duplicate endpoint definitions exist: direct routes in `app.py` and blueprint routes in `routes/passport.py`. Mixed engines (`models_db.engine` vs `db.engine`) and potential table-init timing cause ambiguity and failures.
+- **Where we left off**: Confirm identity via `GET /api/test-passport`, run `POST /api/v1/user/passport/sync`, then `GET /api/v1/user/passport`.
+- **Immediate plan (pending approval for code cleanup)**: Remove duplicate passport endpoints from `app.py` and keep `routes/passport.py` as the single source (uses `db.engine`). No schema changes.
 
 ### Progress Today (Postgres alignment)
 - **Backend**: Removed sqlite in passport routes; now use `db.engine.begin()` + `text()` with Postgres, `ON CONFLICT` upsert for `user_passport`

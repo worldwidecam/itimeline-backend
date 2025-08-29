@@ -58,6 +58,11 @@ def check_timeline_access(timeline_id, required_role=None):
     # Local imports to avoid circular import issues
     from app import Timeline, TimelineMember
     user_id = get_user_id()
+    # Normalize to int for reliable comparisons
+    try:
+        user_id_int = int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        user_id_int = user_id
     
     try:
         # Get timeline information using SQLAlchemy
@@ -66,16 +71,26 @@ def check_timeline_access(timeline_id, required_role=None):
             return None, None, False
         
         # SiteOwner (user ID 1) always has access to any timeline
-        if user_id == 1:
+        if user_id_int == 1:
             membership = TimelineMember.query.filter_by(
-                timeline_id=timeline_id, user_id=user_id
+                timeline_id=timeline_id, user_id=user_id_int
             ).first()
+            return timeline, membership, True
+        
+        # Timeline creator should have admin-level access even without an explicit membership row
+        if timeline.created_by == user_id_int:
+            # Best effort: see if they also have a membership row (active or not)
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id, 
+                user_id=user_id_int
+            ).first()
+            # Creator can perform moderator/admin actions
             return timeline, membership, True
         
         # Check if user is an active member of the timeline
         membership = TimelineMember.query.filter_by(
             timeline_id=timeline_id, 
-            user_id=user_id,
+            user_id=user_id_int,
             is_active_member=True
         ).first()
         
@@ -167,7 +182,8 @@ def get_timeline_members(timeline_id):
             User, TimelineMember.user_id == User.id
         ).filter(
             TimelineMember.timeline_id == timeline_id,
-            TimelineMember.is_active_member == True  # Only get active members
+            TimelineMember.is_active_member == True,  # Only active
+            TimelineMember.is_blocked == False        # Exclude blocked
         ).order_by(
             TimelineMember.joined_at.asc()
         ).all()
@@ -247,6 +263,129 @@ def get_timeline_members(timeline_id):
         
     except Exception as e:
         logger.error(f"Error getting timeline members: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+ 
+
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/block', methods=['OPTIONS'], endpoint='community_block_member_preflight')
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
+def preflight_block_member(timeline_id, user_id):
+    return ('', 204)
+
+
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/block', methods=['POST'], endpoint='community_block_member_v2')
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['POST'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
+@jwt_required()
+def block_timeline_member_v2(timeline_id, user_id):
+    """Block a member: set is_blocked=True and is_active_member=False"""
+    from app import db, TimelineMember
+    timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
+    if not has_access:
+        return jsonify({"error": "Access denied"}), 403
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason')
+    try:
+        member = TimelineMember.query.filter_by(timeline_id=timeline_id, user_id=user_id).first()
+        if not member:
+            return jsonify({"error": "Member not found"}), 404
+        if member.is_blocked:
+            return jsonify({"message": "Already blocked"}), 200
+
+        member.is_blocked = True
+        member.is_active_member = False
+        member.blocked_at = datetime.now()
+        member.blocked_reason = reason
+        db.session.commit()
+        return jsonify({
+            'message': 'Member blocked',
+            'user_id': user_id,
+            'timeline_id': timeline_id,
+            'is_blocked': True,
+            'is_active_member': False
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error blocking member: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/unblock', methods=['OPTIONS'], endpoint='community_unblock_member_preflight')
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
+def preflight_unblock_member(timeline_id, user_id):
+    return ('', 204)
+
+
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/unblock', methods=['POST'], endpoint='community_unblock_member_v2')
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['POST'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
+@jwt_required()
+def unblock_timeline_member_v2(timeline_id, user_id):
+    """Unblock a member: set is_blocked=False and is_active_member=True"""
+    from app import db, TimelineMember
+    timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
+    if not has_access:
+        return jsonify({"error": "Access denied"}), 403
+
+    try:
+        member = TimelineMember.query.filter_by(timeline_id=timeline_id, user_id=user_id).first()
+        if not member:
+            return jsonify({"error": "Member not found"}), 404
+        if not member.is_blocked and member.is_active_member:
+            return jsonify({"message": "Already active"}), 200
+
+        member.is_blocked = False
+        member.is_active_member = True
+        member.blocked_reason = None
+        db.session.commit()
+        return jsonify({
+            'message': 'Member unblocked',
+            'user_id': user_id,
+            'timeline_id': timeline_id,
+            'is_blocked': False,
+            'is_active_member': True
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unblocking member: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['POST'])
@@ -877,7 +1016,7 @@ def get_shared_events(timeline_id):
 @community_bp.route('/timelines/<int:timeline_id>/blocked-members', methods=['GET'])
 @jwt_required()
 def get_blocked_members(timeline_id):
-    """Get all blocked (inactive) members of a timeline"""
+    """Get all blocked members of a timeline using persistent fields."""
     # Check if user has access to view blocked members (admin or moderator)
     timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
     
@@ -885,41 +1024,30 @@ def get_blocked_members(timeline_id):
         return jsonify({"error": "Access denied. You need moderator privileges to view blocked members."}), 403
     
     try:
-        # Get all inactive members with user information using SQLAlchemy
         blocked_members = db.session.query(
             TimelineMember, User
         ).join(
             User, TimelineMember.user_id == User.id
         ).filter(
             TimelineMember.timeline_id == timeline_id,
-            TimelineMember.is_active_member == False  # Only get inactive members
+            TimelineMember.is_blocked == True
         ).order_by(
-            TimelineMember.joined_at.desc()  # Most recently blocked first
+            TimelineMember.blocked_at.desc().nullslast()
         ).all()
         
         result = []
-        
         for member, user in blocked_members:
-            # Get the action that blocked this member (if available)
-            block_action = TimelineAction.query.filter_by(
-                timeline_id=timeline_id,
-                target_user_id=member.user_id,
-                action_type='member_removed'
-            ).order_by(TimelineAction.created_at.desc()).first()
-            
-            blocked_date = block_action.created_at if block_action else member.joined_at
-            blocked_by = block_action.user_id if block_action else None
-            reason = block_action.details if block_action else "Removed by administrator"
-            
             member_data = {
                 'id': member.id,
                 'timeline_id': member.timeline_id,
                 'user_id': member.user_id,
                 'role': member.role,
+                'is_active_member': bool(member.is_active_member),
+                'is_blocked': bool(member.is_blocked),
+                'blocked_at': member.blocked_at.isoformat() if member.blocked_at else None,
+                'blocked_reason': member.blocked_reason,
                 'joined_at': member.joined_at.isoformat() if member.joined_at else None,
-                'blocked_date': blocked_date.isoformat() if blocked_date else None,
-                'blocked_by': blocked_by,
-                'reason': reason,
+                'invited_by': member.invited_by,
                 'user': {
                     'id': user.id,
                     'username': user.username,
@@ -931,7 +1059,6 @@ def get_blocked_members(timeline_id):
             result.append(member_data)
         
         return jsonify(result), 200
-        
     except Exception as e:
         logger.error(f"Error getting blocked members: {str(e)}")
         return jsonify({"error": str(e)}), 500

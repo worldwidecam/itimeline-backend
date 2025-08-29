@@ -23,7 +23,7 @@ import sqlalchemy
 from sqlalchemy import text
 import sqlite3
 import json
-from models import UserPassport
+from models import UserPassport, db as models_db
 # Import necessary functions from passport module
 import json
 from datetime import datetime
@@ -84,40 +84,44 @@ def get_user_passport():
     try:
         # Get current user ID from JWT
         current_user_id = get_jwt_identity()
-        
-        # Check if user has a passport using SQLAlchemy
-        passport = UserPassport.query.filter_by(user_id=current_user_id).first()
-        
-        if not passport:
-            # Create a new passport if one doesn't exist
-            passport = UserPassport(
-                user_id=current_user_id,
-                memberships_json='[]',
-                last_updated=datetime.now()
-            )
-            db.session.add(passport)
-            db.session.commit()
-            
-            # Return empty memberships
+
+        # Use raw SQL against db engine to avoid ORM cross-binding issues
+        with db.engine.begin() as conn:
+            row = conn.execute(text(
+                'SELECT user_id, memberships_json, last_updated FROM user_passport WHERE user_id = :uid'
+            ), { 'uid': current_user_id }).mappings().first()
+
+            if not row:
+                # Insert empty passport if not present
+                conn.execute(text(
+                    'INSERT INTO user_passport (user_id, memberships_json, last_updated) VALUES (:uid, :mjson, :lu)'
+                ), { 'uid': current_user_id, 'mjson': '[]', 'lu': datetime.now() })
+                return jsonify({
+                    'memberships': [],
+                    'last_updated': datetime.now().isoformat()
+                }), 200
+
+            # Parse memberships JSON safely
+            memberships_json = row['memberships_json'] if row['memberships_json'] is not None else '[]'
+            try:
+                memberships = json.loads(memberships_json)
+            except json.JSONDecodeError:
+                memberships = []
+
+            last_updated_val = row['last_updated']
+            if hasattr(last_updated_val, 'isoformat'):
+                last_updated_str = last_updated_val.isoformat()
+            else:
+                # Fallback if driver returns string
+                last_updated_str = str(last_updated_val) if last_updated_val else datetime.now().isoformat()
+
             return jsonify({
-                'memberships': [],
-                'last_updated': datetime.now().isoformat()
+                'memberships': memberships,
+                'last_updated': last_updated_str
             }), 200
-        
-        # Parse memberships from JSON
-        try:
-            memberships = json.loads(passport.memberships_json)
-        except json.JSONDecodeError:
-            memberships = []
-        
-        # Return passport data
-        return jsonify({
-            'memberships': memberships,
-            'last_updated': passport.last_updated.isoformat() if passport.last_updated else datetime.now().isoformat()
-        }), 200
-        
+
     except Exception as e:
-        logger.error(f"Error getting user passport: {str(e)}")
+        logger.exception(f"Error getting user passport")
         return jsonify({'error': 'Failed to get user passport'}), 500
 
 @app.route('/api/v1/user/passport/sync', methods=['POST'])
@@ -224,7 +228,12 @@ def sync_user_passport():
 # Basic configurations
 app.config.update(
     # Database Configuration - PostgreSQL Support (migrated from SQLite)
-    SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL', 'postgresql://postgres:death2therich@localhost:5432/itimeline_test'),
+    # NOTE: Hardcoded for local development on purpose.
+    # TODO(PROD): Before deploying to production/Render, switch back to environment-based config, e.g.:
+    # SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL', 'postgresql://postgres:death2therich@localhost:5432/itimeline_test')
+    # This avoids accidentally pointing local dev to a remote DB and keeps deployment flexible.
+    # Prioritize local development over Render.com (which isn't properly set up yet)
+    SQLALCHEMY_DATABASE_URI='postgresql://postgres:death2therich@localhost:5432/itimeline_test',
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     JWT_SECRET_KEY=os.getenv('JWT_SECRET_KEY', 'your-secret-key'),  # Change this in production
     JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=4),  # Increased from 1 hour to 4 hours
@@ -238,6 +247,8 @@ app.config.update(
 # Initialize extensions
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
+# Initialize the separate SQLAlchemy instance used by models.py
+# models_db.init_app(app)  # Commented out to avoid duplicate SQLAlchemy registration
 
 # Import blueprints
 from routes.upload import upload_bp
@@ -275,6 +286,8 @@ def test_passport():
 # Ensure the database exists
 with app.app_context():
     db.create_all()
+    # Ensure tables defined in models.py (e.g., user_passport) are created
+    # models_db.create_all()  # Commented out to avoid duplicate SQLAlchemy registration
 
 # Configure upload paths
 base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -583,6 +596,10 @@ class TimelineMember(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     role = db.Column(db.String(20), nullable=False, default='member')  # admin, moderator, member, SiteOwner
     is_active_member = db.Column(db.Boolean, default=True)  # True for active members, False for pending
+    # Persistent blocking fields
+    is_blocked = db.Column(db.Boolean, default=False)
+    blocked_at = db.Column(db.DateTime, nullable=True)
+    blocked_reason = db.Column(db.Text, nullable=True)
     joined_at = db.Column(db.DateTime, default=datetime.now)
     invited_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     

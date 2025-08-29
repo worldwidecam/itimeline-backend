@@ -27,6 +27,16 @@ cors = CORS(
 
 **Important**: Do not add additional `@app.after_request` or `@app.before_request` handlers for CORS as they will conflict with the above configuration.
 
+### Local vs Production Database Configuration
+
+- For local development, `app.py` currently hardcodes the PostgreSQL URL in `app.config.update()['SQLALCHEMY_DATABASE_URI']` to ensure the app never tries to hit a remote Render DB during dev.
+- Connection used locally: `postgresql://postgres:death2therich@localhost:5432/itimeline_test`.
+- TODO (Production): Before deploying, switch back to environment-based configuration and remove the hardcoded URI. Example:
+  - `SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL', 'postgresql://postgres:death2therich@localhost:5432/itimeline_test')`
+- If you need to test a different DB temporarily, you can still override at runtime:
+  - PowerShell: `$env:DATABASE_URL = "postgresql://user:pass@host:5432/db"`
+  - Bash: `export DATABASE_URL=postgresql://user:pass@host:5432/db`
+
 ### Development Best Practices
 
 1. **Database Migrations**:
@@ -55,6 +65,10 @@ cors = CORS(
 - Database management with SQLAlchemy
 - CORS support for cross-domain requests
 - User-specific membership persistence with Passport system
+
+### Community Admin Access UX (Frontend)
+- The frontend now includes a `CommunityLockView` and an AdminPanel access-loading guard to prevent unauthorized content flashes during access checks.
+- No backend route or schema changes were required for this UX improvement; existing membership and role checks remain the source of truth.
 
 ### User Passport System
 - **Membership Levels**:
