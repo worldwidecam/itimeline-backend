@@ -390,7 +390,7 @@ def get_timeline_members(timeline_id):
 
  
 
-@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/block', methods=['OPTIONS'], endpoint='community_block_member_preflight')
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/block', methods=['POST', 'OPTIONS'], endpoint='community_block_member_v2')
 @cross_origin(
     origins=[
         'http://localhost:3000',
@@ -398,23 +398,7 @@ def get_timeline_members(timeline_id):
         'https://i-timeline.com',
         'https://www.i-timeline.com'
     ],
-    methods=['OPTIONS'],
-    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
-    supports_credentials=True,
-)
-def preflight_block_member(timeline_id, user_id):
-    return ('', 204)
-
-
-@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/block', methods=['POST'], endpoint='community_block_member_v2')
-@cross_origin(
-    origins=[
-        'http://localhost:3000',
-        'http://127.0.0.1:3000',
-        'https://i-timeline.com',
-        'https://www.i-timeline.com'
-    ],
-    methods=['POST'],
+    methods=['POST', 'OPTIONS'],
     allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
     supports_credentials=True,
 )
@@ -425,14 +409,45 @@ def block_timeline_member_v2(timeline_id, user_id):
     from sqlalchemy import text
     
     try:
-        current_user_id = int(get_user_id())
+        raw_identity = get_user_id()
+        logger.info(f"block_timeline_member_v2: raw_identity={raw_identity}, timeline_id={timeline_id}, target_user_id={user_id}")
+        current_user_id = int(raw_identity)
         user_id = int(user_id)
         timeline_id = int(timeline_id)
         
         data = request.get_json(silent=True) or {}
         reason = data.get('reason')
         
-        with db.engine.begin() as conn:
+        # Obtain engine in a version-safe way (mirror get_timeline_members)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("block_timeline_member_v2: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+                logger.info("block_timeline_member_v2: using engine via sa_ext.db.engine")
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+                logger.info("block_timeline_member_v2: using engine via sa_ext.engine")
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                    logger.info("block_timeline_member_v2: using engine via sa_ext.engines[current_app]")
+                except Exception as e:
+                    logger.warning(f"block_timeline_member_v2: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            try:
+                from app import db as app_db
+                engine = app_db.engine
+                logger.warning("block_timeline_member_v2: fell back to importing db from app (monitor for binding issues)")
+            except Exception as e:
+                logger.exception(f"block_timeline_member_v2: failed to obtain engine from app db: {e}")
+                raise
+
+        with engine.begin() as conn:
             # Get timeline and actor/target member info
             timeline_row = conn.execute(
                 text("SELECT created_by FROM timeline WHERE id = :tid"),
@@ -515,10 +530,10 @@ def block_timeline_member_v2(timeline_id, user_id):
         }), 200
         
     except Exception as e:
-        logger.error(f"Error blocking member: {str(e)}")
+        logger.exception(f"Error blocking member: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/unblock', methods=['OPTIONS'], endpoint='community_unblock_member_preflight')
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/unblock', methods=['POST', 'OPTIONS'], endpoint='community_unblock_member_v2')
 @cross_origin(
     origins=[
         'http://localhost:3000',
@@ -526,23 +541,7 @@ def block_timeline_member_v2(timeline_id, user_id):
         'https://i-timeline.com',
         'https://www.i-timeline.com'
     ],
-    methods=['OPTIONS'],
-    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
-    supports_credentials=True,
-)
-def preflight_unblock_member(timeline_id, user_id):
-    return ('', 204)
-
-
-@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/unblock', methods=['POST'], endpoint='community_unblock_member_v2')
-@cross_origin(
-    origins=[
-        'http://localhost:3000',
-        'http://127.0.0.1:3000',
-        'https://i-timeline.com',
-        'https://www.i-timeline.com'
-    ],
-    methods=['POST'],
+    methods=['POST', 'OPTIONS'],
     allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
     supports_credentials=True,
 )
@@ -553,11 +552,42 @@ def unblock_timeline_member_v2(timeline_id, user_id):
     from sqlalchemy import text
     
     try:
-        current_user_id = int(get_user_id())
+        raw_identity = get_jwt_identity()
+        logger.info(f"unblock_timeline_member_v2: raw_identity={raw_identity}, timeline_id={timeline_id}, target_user_id={user_id}")
+        current_user_id = int(raw_identity)
         user_id = int(user_id)
         timeline_id = int(timeline_id)
         
-        with db.engine.begin() as conn:
+        # Obtain engine in a version-safe way (mirror get_timeline_members)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("unblock_timeline_member_v2: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+                logger.info("unblock_timeline_member_v2: using engine via sa_ext.db.engine")
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+                logger.info("unblock_timeline_member_v2: using engine via sa_ext.engine")
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                    logger.info("unblock_timeline_member_v2: using engine via sa_ext.engines[current_app]")
+                except Exception as e:
+                    logger.warning(f"unblock_timeline_member_v2: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            try:
+                from app import db as app_db
+                engine = app_db.engine
+                logger.warning("unblock_timeline_member_v2: fell back to importing db from app (monitor for binding issues)")
+            except Exception as e:
+                logger.exception(f"unblock_timeline_member_v2: failed to obtain engine from app db: {e}")
+                raise
+
+        with engine.begin() as conn:
             # Get timeline and actor/target member info
             timeline_row = conn.execute(
                 text("SELECT created_by FROM timeline WHERE id = :tid"),
@@ -642,7 +672,7 @@ def unblock_timeline_member_v2(timeline_id, user_id):
         }), 200
         
     except Exception as e:
-        logger.error(f"Error unblocking member: {str(e)}")
+        logger.exception(f"Error unblocking member: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members', methods=['POST'])
