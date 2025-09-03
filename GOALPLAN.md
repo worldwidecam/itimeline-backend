@@ -1,51 +1,59 @@
 # iTimeline User Passport Implementation - Goal Plan
 
-## Concise Status (2025-08-28)
+## Concise Status (2025-08-31)
 - **What we're working on**: Community timeline admin actions and User Passport stability
-- **Finished**: UserPassport model/table; community blueprint registered in `app.py`; admin/member routes active
-- **Current problems**:
-  - 403 on `GET /api/v1/timelines/5/blocked-members` when using a non-admin member (user_id=2). Access requires moderator/admin/creator or SiteOwner per `check_timeline_access()` in `routes/community.py`.
-  - 500 on `GET /api/v1/user/passport`. Two duplicate endpoint definitions exist: direct routes in `app.py` and blueprint routes in `routes/passport.py`. Mixed engines (`models_db.engine` vs `db.engine`) and potential table-init timing cause ambiguity and failures.
-- **Where we left off**: Confirm identity via `GET /api/test-passport`, run `POST /api/v1/user/passport/sync`, then `GET /api/v1/user/passport`.
-- **Immediate plan (pending approval for code cleanup)**: Remove duplicate passport endpoints from `app.py` and keep `routes/passport.py` as the single source (uses `db.engine`). No schema changes.
+- **Finished**: UserPassport model/table; community blueprint registered in `app.py`; admin/member routes active; duplicate passport routes removed from `app.py` (single source in `routes/passport.py`)
+- **Current focus/problems**:
+  - 403 on `GET /api/v1/timelines/5/blocked-members` for non-privileged users is expected per `check_timeline_access()` rules.
+  - Finalize E2E verification that member removal persists across refresh/sessions after `POST /api/v1/user/passport/sync`.
+- **Where we left off**: Identity confirmed; blueprint routes active; proceed with removal → sync → reload validation.
+- **Immediate plan**: Verify E2E removal persistence and tighten logs. No schema changes.
 
 ### Progress Today (Postgres alignment)
 - **Backend**: Removed sqlite in passport routes; now use `db.engine.begin()` + `text()` with Postgres, `ON CONFLICT` upsert for `user_passport`
 - **Runtime**: Backend runs against local Postgres via `DATABASE_URL`; frontend Vite dev server running and hitting backend
 
-### Next Minute Step — Remove Button Path
-1) **Enable the active DELETE route under `/api/v1`**
-   - Register `routes/community.py` blueprint (`community_bp`) in `app.py` with `url_prefix='/api/v1'` so `DELETE /api/v1/timelines/<timeline_id>/members/<user_id>` is live.
-   - Confirm the route performs soft-delete: `timeline_member.is_active_member = FALSE` with proper permission checks.
-2) **On successful DELETE**: Ensure client (or server) triggers `POST /api/v1/user/passport/sync` to persist the change.
+### Next Step — Remove/Block Intent vs Current Behavior
+1) **DELETE route under `/api/v1` is active**
+   - `community_bp` is registered in `app.py` with `url_prefix='/api/v1'`, so `DELETE /api/v1/timelines/<timeline_id>/members/<user_id>` is live.
+   - Current behavior: sets `is_active_member = FALSE` AND `is_blocked = TRUE` (acts like a block/ban, not a kick).
+2) **On successful DELETE**: Client should trigger `POST /api/v1/user/passport/sync` to persist membership changes.
 
-Mini-roadmap after this minute step:
-- [ ] Add log lines in DELETE handler to confirm update counts and acting/admin user
-- [ ] Verify `GET /api/v1/membership/timelines/{id}/members` excludes inactive members
-- [ ] Add a tiny E2E check: remove → sync → reload → member stays removed
-- [ ] Later: consider emitting passport sync server-side within the same transaction
+Mini-roadmap for alignment:
+- [ ] Add log lines in DELETE/BLOCK/UNBLOCK handlers to capture actor/target and decision
+- [ ] Verify `GET /api/v1/timelines/{id}/members` excludes `is_blocked = TRUE`
+- [ ] Verify `GET /api/v1/timelines/{id}/blocked-members` lists only `is_blocked = TRUE`
+- [ ] E2E: remove → sync → refresh; block → sync → refresh; unblock → sync → refresh
 
 ---
 
-## Community Admin "Remove from community" — Findings (Quarantine Mode)
+## Community Admin — Intent & Findings (Updated)
 
+### Confirmed Intent (2025-09-02)
+- Remove (kick): set `is_active_member = FALSE`, `is_blocked = FALSE`. User must re-Join to return.
+- Block (ban): set `is_blocked = TRUE`, `is_active_member = FALSE`. User appears in blocked list.
+- Unblock: set `is_blocked = FALSE`, `is_active_member = TRUE` (restore active standing).
+- Permissions (all actions): actor rank > target rank (SiteOwner > Creator/Admin > Moderator > Member). No self-actions. Equal rank cannot act on equal rank.
+
+### Frontend call path
 - **Frontend call path**: `src/components/timeline-v3/community/AdminPanel.js` → `handleRemoveMember()` → `removeMember(timelineId, userId)` in `src/utils/api.js`.
 - **DELETE endpoint used by frontend**: `/api/v1/timelines/{timelineId}/members/{userId}`.
-- **Backend implementation location**: `routes/community.py` defines `@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>', methods=['DELETE'])` which performs a soft delete (`is_active_member = False`) with permission checks.
-- **Critical issue**: `community_bp` is currently NOT registered in `app.py`:
-  - Import commented: `# from routes.community import community_bp`
-  - Registration commented: `# app.register_blueprint(community_bp, url_prefix='/api/v1')`
-- **Resulting mismatch**:
-  - Member listing uses active routes in `app.py`: `GET /api/v1/membership/timelines/{id}/members` (works).
-  - Removal uses unregistered blueprint route under `/api/v1/timelines/...` (likely 404/401), so the button appears to work in UI (optimistic state + cache clears) but does not persist server-side.
-- **Caching/state notes**: After DELETE attempt, UI filters member locally and clears `timeline_*` and `user_passport_*` keys, but a full reload restores the member since backend didn’t persist removal.
+- **Backend implementation location**: `routes/community.py` defines `@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>', methods=['DELETE'])`.
+- **Current result**: DELETE behaves like block (`is_blocked = TRUE`). This will be changed to "kick" per intent.
+- **Blueprint registration**: `community_bp` is imported and registered in `app.py` with `url_prefix='/api/v1'`; route is active.
+- **Post-action**: Client should call `POST /api/v1/user/passport/sync`.
 
-### Decision Point (Next Step after Restart)
+### Decision Point
 
-- **Action**: Review these findings and decide one path:
-  1) Keep current button flow and enable/fix backend endpoint registration for `community_bp` under `/api/v1` to activate DELETE/role/blocked routes.
-  2) Redesign button to target the already-active "new clean" membership routes (align remove with `/api/v1/membership/...`) and deprecate old `/api/v1/timelines/...` paths.
-- We will not implement changes until the decision is made; this GOALPLAN serves as the guide for that review.
+- Decision: Align DELETE to be kick-only; keep BLOCK/UNBLOCK semantics; apply rank-based permission checks across actions; passport sync remains client-triggered post-action.
+
+### E2E Verification Checklist
+
+- [ ] Remove member via `DELETE /api/v1/timelines/<timeline_id>/members/<user_id>` (as admin/mod).
+- [ ] Immediately call `POST /api/v1/user/passport/sync`; confirm 200 and updated `last_updated`.
+- [ ] `GET /api/v1/membership/timelines/{id}/members` excludes inactive member.
+- [ ] Refresh frontend; removed member does not reappear in AdminPanel or MemberList.
+- [ ] Repeat in second browser/profile to confirm persistence across sessions.
 
 ## Detailed history (archive)
 

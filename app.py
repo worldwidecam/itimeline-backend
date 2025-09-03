@@ -23,7 +23,7 @@ import sqlalchemy
 from sqlalchemy import text
 import sqlite3
 import json
-from models import UserPassport, db as models_db
+# from models import UserPassport  # Temporarily disabled to isolate SQLAlchemy registration issue
 # Import necessary functions from passport module
 import json
 from datetime import datetime
@@ -3581,6 +3581,58 @@ def update_timeline_quote(timeline_id):
         db.session.rollback()
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/api/v1/timelines/<int:timeline_id>/members/<int:user_id>/remove', methods=['DELETE'])
+@jwt_required()
+def remove_member_direct(timeline_id, user_id):
+    """Direct remove endpoint in app.py to bypass SQLAlchemy registration issues"""
+    try:
+        current_user_id = int(get_jwt_identity())
+        user_id = int(user_id)
+        timeline_id = int(timeline_id)
+        
+        # Basic permission check: SiteOwner (1) or timeline creator can remove
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Allow SiteOwner (1) or creator to remove
+        if current_user_id != 1 and current_user_id != timeline.created_by:
+            return jsonify({"error": "Access denied"}), 403
+        
+        # Don't remove SiteOwner
+        if user_id == 1:
+            return jsonify({"error": "Cannot remove site owner"}), 403
+        
+        # Don't allow self-removal
+        if user_id == current_user_id:
+            return jsonify({"error": "Cannot remove yourself"}), 400
+        
+        # Find and update the member
+        member = TimelineMember.query.filter_by(
+            timeline_id=timeline_id, 
+            user_id=user_id
+        ).first()
+        
+        if not member:
+            return jsonify({"error": "Member not found"}), 404
+        
+        # Perform the removal: set inactive and blocked
+        member.is_active_member = False
+        member.is_blocked = True
+        member.blocked_at = datetime.now()
+        member.blocked_reason = 'Removed by admin'
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Member removed successfully",
+            "removed_user_id": user_id,
+            "removed_by": current_user_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error removing member: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
