@@ -303,6 +303,74 @@ The lists below reflect what is currently active in this codebase and what is th
 - **CORS Issues**: Ensure the frontend URL is correctly set in the CORS configuration
 - **Membership Persistence Issues**: Run `python fix_passport_sync.py` to synchronize all user passports with their actual membership data
 
+### Migration Troubleshooting & Lessons Learned (PostgreSQL)
+
+When a migration appears to “hang,” it’s almost always a Postgres table lock. Use this quick playbook.
+
+1. **Run a read-only audit** (fast, safe)
+   ```powershell
+   python scripts/audit_schema.py
+   ```
+   - Confirms whether expected columns exist (e.g., `timeline_member.is_blocked`).
+
+2. **If columns are missing, diagnose locks**
+   - If `psql` is available:
+     ```powershell
+     psql "postgresql://postgres:death2therich@localhost:5432/itimeline_test" -c "SELECT pid, usename, state, wait_event_type, wait_event, query_start, left(query,200) AS query FROM pg_stat_activity WHERE datname = 'itimeline_test' ORDER BY query_start;"
+     psql "postgresql://postgres:death2therich@localhost:5432/itimeline_test" -c "LOCK TABLE public.timeline_member IN ACCESS EXCLUSIVE MODE NOWAIT;"  # should error if locked
+     ```
+   - If `psql` is NOT available, use the included Python helper:
+     ```powershell
+     python find_blockers.py
+     ```
+     - Shows active sessions and current locks on `timeline_member`.
+
+3. **Kill the blocker (local dev only; safe)**
+   - With `psql`: `SELECT pg_terminate_backend(<PID>);`
+   - Or use the included helper (edit PID if needed):
+     ```powershell
+     python kill_blocker.py
+     ```
+
+4. **Apply migration again**
+   - The migration script `migrations/add_blocking_fields.py` now sets Postgres timeouts to fail fast and prints diagnostics on lock contention.
+   ```powershell
+   $env:DATABASE_URL='postgresql://postgres:death2therich@localhost:5432/itimeline_test'; python migrations/add_blocking_fields.py
+   ```
+
+5. **Verify**
+   ```powershell
+   python scripts/audit_schema.py
+   ```
+
+#### Why it hung (root cause)
+PostgreSQL DDL (e.g., `ALTER TABLE`) requires an exclusive lock. Another session holding a long-lived transaction on the same table will cause the DDL to wait indefinitely. We observed a 2.5-hour exclusive lock on `timeline_member` blocking the migration. After terminating that backend PID and re-running, the migration completed immediately.
+
+#### New helpers and defensive changes
+- `migrations/add_blocking_fields.py` now sets:
+  - `lock_timeout = '5s'`
+  - `statement_timeout = '15s'`
+  - On failure, it prints diagnostic info about potential blockers.
+- Helper scripts (for local dev):
+  - `find_blockers.py` — list sessions/locks and queries.
+  - `kill_blocker.py` — terminate a known blocking PID, then apply DDL.
+  - `quick_add_columns.py` — minimal DDL applier with short timeouts.
+- Engine access utility:
+  - `utils/db_helper.py#get_db_engine()` — consistent engine retrieval across Flask-SQLAlchemy versions.
+
+#### PowerShell execution policy (if you use a venv)
+- View policy: `Get-ExecutionPolicy -List`
+- Temporary bypass (current window):
+  ```powershell
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+  .\.venv\Scripts\Activate.ps1
+  ```
+- Per-user (recommended):
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+- You can always run Python without activating the venv by calling `.\.venv\Scripts\python.exe` directly.
+
 ### Fixing Membership Persistence
 
 If users experience issues with their membership status not persisting across sessions:

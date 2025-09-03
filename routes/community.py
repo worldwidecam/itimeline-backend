@@ -298,25 +298,9 @@ def get_timeline_members(timeline_id):
                 logger.warning(f"get_timeline_members: timeline {timeline_id} not found")
                 return jsonify({"error": "Timeline not found"}), 404
             
-            # Detect if is_blocked column exists to avoid UndefinedColumn errors on older schemas
-            logger.info("get_timeline_members: checking if timeline_member.is_blocked exists")
-            has_is_blocked = conn.execute(
-                text(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name = 'timeline_member'
-                      AND column_name = 'is_blocked'
-                    LIMIT 1
-                    """
-                )
-            ).first() is not None
-            logger.info(f"get_timeline_members: is_blocked column present: {has_is_blocked}")
-
-            # Fetch active members (and exclude blocked if column exists)
+            # Fetch active members (excluding blocked)
             logger.info("get_timeline_members: querying active members")
-            base_sql = (
-                """
+            rows = conn.execute(text("""
                 SELECT tm.id, tm.timeline_id, tm.user_id, tm.role, tm.is_active_member,
                        tm.joined_at, tm.invited_by,
                        u.id AS user_id_u, u.username, u.email, u.avatar_url, u.bio
@@ -324,11 +308,8 @@ def get_timeline_members(timeline_id):
                 JOIN "user" u ON tm.user_id = u.id
                 WHERE tm.timeline_id = :tid
                   AND tm.is_active_member = TRUE
-                """
-            )
-            if has_is_blocked:
-                base_sql += " AND (tm.is_blocked IS NULL OR tm.is_blocked = FALSE)"
-            rows = conn.execute(text(base_sql), {"tid": timeline_id}).mappings().all()
+                  AND (tm.is_blocked IS NULL OR tm.is_blocked = FALSE)
+            """), {"tid": timeline_id}).mappings().all()
             
             logger.info(f"get_timeline_members: fetched {len(rows)} db members")
             for row in rows:
