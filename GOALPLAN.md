@@ -118,6 +118,13 @@ We have successfully implemented the initial version of the UserPassport system 
 - [ ] Plan for potential future features like membership expiration or tiered access
 - [ ] Consider adding a passport version field for future schema migrations
 
+## Backlog
+
+- [ ] Members listing pagination — buffered infinite scroll
+  - Fixed window shows ~10; fetch 30 per page; prefetch at ~70% scroll depth
+  - Stable sort; de-dupe on merge; subtle shimmer loader; no “Load more” button
+  - Backend later: `limit/offset` + `hasMore/nextOffset` response; stable ordering
+
 ## Terminology
 
 - **UserPassport**: A server-side, user-specific collection of membership data that persists across devices and sessions

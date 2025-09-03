@@ -721,12 +721,43 @@ def remove_timeline_member_v2(timeline_id, user_id):
     from sqlalchemy import text
     
     try:
-        current_user_id = int(get_user_id())
+        raw_identity = get_user_id()
+        logger.info(f"remove_timeline_member_v2: raw_identity={raw_identity}, timeline_id={timeline_id}, target_user_id={user_id}")
+        current_user_id = int(raw_identity)
         user_id = int(user_id)
         timeline_id = int(timeline_id)
         
+        # Obtain engine in a version-safe way (mirror get_timeline_members)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("remove_timeline_member_v2: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+                logger.info("remove_timeline_member_v2: using engine via sa_ext.db.engine")
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+                logger.info("remove_timeline_member_v2: using engine via sa_ext.engine")
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                    logger.info("remove_timeline_member_v2: using engine via sa_ext.engines[current_app]")
+                except Exception as e:
+                    logger.warning(f"remove_timeline_member_v2: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            try:
+                from app import db as app_db
+                engine = app_db.engine
+                logger.warning("remove_timeline_member_v2: fell back to importing db from app (monitor for binding issues)")
+            except Exception as e:
+                logger.exception(f"remove_timeline_member_v2: failed to obtain engine from app db: {e}")
+                raise
+
         # Single transaction with rank-based permission check
-        with db.engine.begin() as conn:
+        with engine.begin() as conn:
             # Get timeline and actor/target member info
             timeline_row = conn.execute(
                 text("SELECT created_by FROM timeline WHERE id = :tid"),
@@ -795,7 +826,7 @@ def remove_timeline_member_v2(timeline_id, user_id):
         }), 200
         
     except Exception as e:
-        logger.error(f"Error in remove_timeline_member_v2: {str(e)}")
+        logger.exception(f"Error in remove_timeline_member_v2: {str(e)}")
         return jsonify({"error": f"Error removing member: {str(e)}"}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/role', methods=['PUT'])
