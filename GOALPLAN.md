@@ -1,13 +1,14 @@
 # iTimeline User Passport Implementation - Goal Plan
 
-## Concise Status (2025-08-31)
-- **What we're working on**: Community timeline admin actions and User Passport stability
+## Concise Status (2025-09-03)
+- **What we're working on**: Community admin actions (Remove/Kick, Block, Unblock) and User Passport stability
 - **Finished**: UserPassport model/table; community blueprint registered in `app.py`; admin/member routes active; duplicate passport routes removed from `app.py` (single source in `routes/passport.py`)
 - **Current focus/problems**:
-  - 403 on `GET /api/v1/timelines/5/blocked-members` for non-privileged users is expected per `check_timeline_access()` rules.
-  - Finalize E2E verification that member removal persists across refresh/sessions after `POST /api/v1/user/passport/sync`.
-- **Where we left off**: Identity confirmed; blueprint routes active; proceed with removal → sync → reload validation.
-- **Immediate plan**: Verify E2E removal persistence and tighten logs. No schema changes.
+  - Block foundation implemented: Blocked state persists after refresh/sessions when client calls `POST /api/v1/user/passport/sync`.
+  - 403 on `GET /api/v1/timelines/{id}/blocked-members` for non-privileged users is expected per `check_timeline_access()`.
+  - Behavior alignment: `DELETE` currently behaves like block; needs split into Kick vs Block.
+- **Where we left off**: E2E tests show persistence after refresh for the block-like flow. Further polish and alignment needed.
+- **Immediate plan**: Chronicle progress; add subgoals; tighten logging. No schema changes.
 
 ### Progress Today (Postgres alignment)
 - **Backend**: Removed sqlite in passport routes; now use `db.engine.begin()` + `text()` with Postgres, `ON CONFLICT` upsert for `user_passport`
@@ -24,6 +25,25 @@ Mini-roadmap for alignment:
 - [ ] Verify `GET /api/v1/timelines/{id}/members` excludes `is_blocked = TRUE`
 - [ ] Verify `GET /api/v1/timelines/{id}/blocked-members` lists only `is_blocked = TRUE`
 - [ ] E2E: remove → sync → refresh; block → sync → refresh; unblock → sync → refresh
+
+### Block Feature Foundation Progress (2025-09-03)
+- **What works now**:
+  - Blocking semantics are functionally achievable via current DELETE path (temporary behavior) and persist after refresh when followed by `POST /api/v1/user/passport/sync`.
+  - Database fields `timeline_member.is_blocked` and `is_active_member` audited and present.
+  - AdminPanel UX reflects changes after passport sync and reload.
+- **Not done yet**:
+  - Dedicated Block and Unblock endpoints (separate from Kick/Remove).
+  - Rank-based enforcement unified across Remove/Block/Unblock.
+  - Consistent response payloads and client messaging.
+  - Server-side logging for actor/target, decisions, and outcomes.
+
+#### Subgoals (do not mark complete yet)
+- [ ] Implement explicit `POST /api/v1/timelines/{id}/members/{userId}/block`
+- [ ] Implement explicit `POST /api/v1/timelines/{id}/members/{userId}/unblock`
+- [ ] Adjust `DELETE /api/v1/timelines/{id}/members/{userId}` to be Kick only (`is_active_member = FALSE`, `is_blocked = FALSE`)
+- [ ] Enforce rank/role rules uniformly (no self-actions; higher rank required; equal rank blocked)
+- [ ] Add structured logs for DELETE/BLOCK/UNBLOCK (actor_id, target_id, timeline_id, action, prev_state → new_state)
+- [ ] Update README and API docs with final semantics once aligned
 
 ---
 

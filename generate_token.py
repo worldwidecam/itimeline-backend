@@ -10,7 +10,7 @@ with app.app_context():
     
     if user:
         # Create an access token for the user
-        access_token = create_access_token(identity=user.id)
+        access_token = create_access_token(identity=str(user.id))
         
         print(f"User: {user.username} (ID: {user.id})")
         print(f"Access Token: {access_token}")

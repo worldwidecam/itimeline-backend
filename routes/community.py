@@ -120,8 +120,33 @@ def check_timeline_access(timeline_id, required_role=None):
         user_id_int = user_id
     
     try:
-        # Use raw SQL with db.engine to avoid ORM binding issues
-        with db.engine.begin() as conn:
+        # Obtain engine in a version-safe way (mirror get_blocked_members pattern)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("check_timeline_access: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                except Exception as e:
+                    logger.warning(f"check_timeline_access: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            try:
+                from app import db as app_db
+                engine = app_db.engine
+                logger.warning("check_timeline_access: fell back to importing db from app")
+            except Exception as e:
+                logger.exception(f"check_timeline_access: failed to obtain engine from app db: {e}")
+                raise
+
+        with engine.begin() as conn:
             # Get timeline information
             timeline_row = conn.execute(
                 text("SELECT id, created_by, name, description, visibility FROM timeline WHERE id = :tid"),
@@ -1318,10 +1343,20 @@ def get_shared_events(timeline_id):
     return jsonify(result), 200
 
 @community_bp.route('/timelines/<int:timeline_id>/blocked-members', methods=['GET'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['GET', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
 @jwt_required()
 def get_blocked_members(timeline_id):
     """Get all blocked members of a timeline using raw SQL."""
-    from app import db
     from sqlalchemy import text
     # Check if user has access to view blocked members (admin or moderator)
     timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
@@ -1330,7 +1365,36 @@ def get_blocked_members(timeline_id):
         return jsonify({"error": "Access denied. You need moderator privileges to view blocked members."}), 403
     
     try:
-        with db.engine.begin() as conn:
+        # Obtain engine in a version-safe way (mirror other endpoints)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("get_blocked_members: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+                logger.info("get_blocked_members: using engine via sa_ext.db.engine")
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+                logger.info("get_blocked_members: using engine via sa_ext.engine")
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                    logger.info("get_blocked_members: using engine via sa_ext.engines[current_app]")
+                except Exception as e:
+                    logger.warning(f"get_blocked_members: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            try:
+                from app import db as app_db
+                engine = app_db.engine
+                logger.warning("get_blocked_members: fell back to importing db from app (monitor for binding issues)")
+            except Exception as e:
+                logger.exception(f"get_blocked_members: failed to obtain engine from app db: {e}")
+                raise
+
+        with engine.begin() as conn:
             blocked_members_data = conn.execute(
                 text("""
                     SELECT tm.id, tm.timeline_id, tm.user_id, tm.role, tm.is_active_member,
@@ -1370,7 +1434,7 @@ def get_blocked_members(timeline_id):
             return jsonify(result), 200
         
     except Exception as e:
-        logger.error(f"Error getting blocked members: {str(e)}")
+        logger.exception(f"Error getting blocked members: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/reported-posts', methods=['GET'])

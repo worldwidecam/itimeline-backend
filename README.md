@@ -70,6 +70,13 @@ cors = CORS(
 - The frontend now includes a `CommunityLockView` and an AdminPanel access-loading guard to prevent unauthorized content flashes during access checks.
 - No backend route or schema changes were required for this UX improvement; existing membership and role checks remain the source of truth.
 
+### Community Admin: Block/Unblock Foundation (2025-09-03)
+- Backend groundwork for block/unblock is in place using `timeline_member.is_blocked` and `is_active_member`.
+- Current behavior (subject to refinement): `DELETE /api/v1/timelines/{timelineId}/members/{userId}` behaves as a block/ban (sets `is_blocked = TRUE` and deactivates membership). This will be split into distinct "kick" vs "block" semantics.
+- Persistence after refresh: Verified that after block/remove, a client-initiated `POST /api/v1/user/passport/sync` persists membership changes across reloads and sessions.
+- Not done yet: Unblock endpoint/flow, rank enforcement across actions, refined responses, and logging.
+- See also: Migration troubleshooting for blocking fields and lock handling in `migrations/add_blocking_fields.py` and the helpers in `scripts/`.
+
 ### User Passport System
 - **Membership Levels**:
   1. **SiteOwner (User ID 1)**: Always has access to all timelines regardless of database state
@@ -312,6 +319,7 @@ When a migration appears to “hang,” it’s almost always a Postgres table lo
    python scripts/audit_schema.py
    ```
    - Confirms whether expected columns exist (e.g., `timeline_member.is_blocked`).
+   - Validates block/unblock groundwork without mutating data.
 
 2. **If columns are missing, diagnose locks**
    - If `psql` is available:
