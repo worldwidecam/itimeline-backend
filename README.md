@@ -111,6 +111,16 @@ cors = CORS(
   - **Published Date**: The server timestamp when the event was created (automatically generated)
 - **Backward Compatibility**: Maintains support for events created before the raw date string implementation
 
+#### Blocked timestamp (timezone note)
+- `timeline_member.blocked_at` is a `TIMESTAMP WITHOUT TIME ZONE`.
+- We currently write with `NOW()` in the DB session timezone (often UTC) and serialize with `.isoformat()` without tz info in `routes/community.py#get_blocked_members`.
+- Symptom observed: late-evening local actions can appear as the next day when displayed as a date (off-by-one day), since the stored wall time reflects the session timezone, not the local display timezone.
+- Frontend-only formatting fixes were not sufficient to correct the day once it’s stored this way.
+- Options (not implemented yet):
+  1) Read-time normalization (preferred, non-breaking): return a derived local date field (e.g., `blocked_date_local`) computed with `AT TIME ZONE <APP_TZ>` and use that for display.
+  2) Write-time normalization: store `NOW() AT TIME ZONE <APP_TZ>` so the saved wall time matches the chosen app timezone.
+  3) Client-side correction: treat incoming timestamps as a specific timezone and shift on the client (fragile; not recommended as a primary fix).
+
 ## Technical Stack
 
 - **Framework**: Flask (Python)

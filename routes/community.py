@@ -530,6 +530,15 @@ def block_timeline_member_v2(timeline_id, user_id):
                 return jsonify({"message": "Already blocked"}), 200
             
             # Perform the block
+            # Timezone note:
+            # - We store blocked_at into a TIMESTAMP WITHOUT TIME ZONE column using NOW().
+            # - If the DB session is UTC, late-evening local actions (e.g., PDT 2025-09-04 17:05)
+            #   can be stored as 2025-09-05 00:05 (UTC wall time). When later shown as a plain date
+            #   this can appear as the next day. We intentionally leave behavior unchanged here.
+            # - Options (not implemented here):
+            #   a) Normalize at READ time (preferred, non-breaking): return a derived local date
+            #      from SQL using AT TIME ZONE and expose as blocked_date_local.
+            #   b) Normalize at WRITE time: set blocked_at = NOW() AT TIME ZONE <APP_TZ>.
             result = conn.execute(
                 text("""
                     UPDATE timeline_member 
@@ -771,7 +780,14 @@ def add_timeline_member(timeline_id):
 )
 @jwt_required()
 def remove_timeline_member_v2(timeline_id, user_id):
-    """Remove v2: Kick member (soft remove) - set is_active_member=FALSE, is_blocked=FALSE"""
+    """Remove v2: Kick member (soft remove) - set is_active_member=FALSE, is_blocked=FALSE
+
+    Note on routing semantics:
+    - We intentionally keep this as a RESTful DELETE on the membership resource.
+    - If desired in the future, we may add a non-breaking alias
+      POST /api/v1/timelines/<id>/members/<user_id>/kick that proxies here.
+      Keeping this comment as a reminder only; no behavior change.
+    """
     from app import db
     from sqlalchemy import text
     
@@ -1417,6 +1433,11 @@ def get_blocked_members(timeline_id):
                     'role': row['role'],
                     'is_active_member': bool(row['is_active_member']),
                     'is_blocked': bool(row['is_blocked']),
+                    # Timezone note:
+                    # - blocked_at is stored as TIMESTAMP WITHOUT TIME ZONE and serialized here
+                    #   via isoformat() without tz info. If the database session used UTC when
+                    #   writing, late local times might look like next-day dates when interpreted
+                    #   as local on the client. Consider a read-time normalized field if needed.
                     'blocked_at': row['blocked_at'].isoformat() if row['blocked_at'] else None,
                     'blocked_reason': row['blocked_reason'],
                     'joined_at': row['joined_at'].isoformat() if row['joined_at'] else None,
