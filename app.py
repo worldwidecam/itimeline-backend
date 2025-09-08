@@ -3160,7 +3160,8 @@ def check_membership_status_new(timeline_id):
             'timeline_type': timeline.timeline_type,
             'timeline_visibility': timeline.visibility,
             'is_creator': timeline.created_by == user_id,
-            'is_site_owner': is_site_owner(user_id)
+            'is_site_owner': is_site_owner(user_id),
+            'is_blocked': bool(getattr(membership, 'is_blocked', False)) if membership else False
         }), 200
         
     except Exception as e:
