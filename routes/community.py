@@ -900,50 +900,147 @@ def remove_timeline_member_v2(timeline_id, user_id):
         logger.exception(f"Error in remove_timeline_member_v2: {str(e)}")
         return jsonify({"error": f"Error removing member: {str(e)}"}), 500
 
-@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/role', methods=['PUT'])
+@community_bp.route('/timelines/<int:timeline_id>/members/<int:user_id>/role', methods=['PUT', 'OPTIONS'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['PUT', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
 @jwt_required()
 def update_member_role(timeline_id, user_id):
-    """Update a member's role in a timeline"""
-    from app import db, TimelineMember
-    timeline, membership, has_access = check_timeline_access(timeline_id, 'admin')
-    
-    if not has_access:
-        return jsonify({"error": "Access denied"}), 403
-    
-    # Parse request data
-    data = request.get_json()
-    if not data or 'role' not in data:
-        return jsonify({"error": "Role not provided"}), 400
-    
-    new_role = data['role']
-    # Include SiteOwner as a valid role, but with restrictions
-    if new_role not in ['SiteOwner', 'admin', 'moderator', 'member']:
-        return jsonify({"error": "Invalid role"}), 400
-        
-    # Only user ID 1 can be assigned the SiteOwner role
-    if new_role == 'SiteOwner' and user_id != 1:
-        return jsonify({"error": "Only the site owner (user ID 1) can have the SiteOwner role"}), 403
-        
-    # Prevent changing the role of user ID 1 (SiteOwner)
-    current_user_id = get_user_id()
-    if user_id == 1 and current_user_id != 1:
-        return jsonify({"error": "Cannot change the role of the site owner"}), 403
-    
-    # Get the member to update
-    member = TimelineMember.query.filter_by(
-        timeline_id=timeline_id, user_id=user_id
-    ).first_or_404()
-    
-    # Prevent downgrading SiteOwner role
-    if member.role == 'SiteOwner' and new_role != 'SiteOwner' and user_id == 1:
-        return jsonify({"error": "Cannot downgrade the site owner's role"}), 403
-    
-    # Update role
-    member.role = new_role
-    db.session.commit()
-    
-    result = member_schema.dump(member)
-    return jsonify(result), 200
+    """Update a member's role in a timeline (engine-based to avoid ORM binding issues)"""
+    try:
+        # Normalize IDs
+        current_user_id = int(get_user_id())
+        timeline_id = int(timeline_id)
+        user_id = int(user_id)
+
+        # Parse request
+        data = request.get_json(silent=True) or {}
+        new_role = data.get('role')
+        if not new_role:
+            return jsonify({"error": "Role not provided"}), 400
+
+        # Validate role
+        if new_role not in ['admin', 'moderator', 'member', 'SiteOwner']:
+            return jsonify({"error": "Invalid role"}), 400
+
+        # SiteOwner restrictions
+        if new_role == 'SiteOwner' and user_id != 1:
+            return jsonify({"error": "Only the site owner (user ID 1) can have the SiteOwner role"}), 403
+        if user_id == 1 and current_user_id != 1:
+            return jsonify({"error": "Cannot change the role of the site owner"}), 403
+
+        # Obtain engine (mirror pattern used in other routes)
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is not None:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                except Exception:
+                    pass
+        if engine is None:
+            from app import db as app_db
+            engine = app_db.engine
+
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            # Get timeline meta
+            trow = conn.execute(
+                text("SELECT created_by FROM timeline WHERE id = :tid"),
+                {"tid": timeline_id}
+            ).mappings().first()
+            if not trow:
+                return jsonify({"error": "Timeline not found"}), 404
+            timeline_created_by = int(trow['created_by']) if trow['created_by'] is not None else None
+
+            # Determine actor role
+            if current_user_id == 1:
+                actor_role = 'SiteOwner'
+            elif timeline_created_by and current_user_id == timeline_created_by:
+                actor_role = 'admin'
+            else:
+                ar = conn.execute(
+                    text("SELECT role FROM timeline_member WHERE timeline_id = :tid AND user_id = :uid AND is_active_member = TRUE"),
+                    {"tid": timeline_id, "uid": current_user_id}
+                ).scalar()
+                if not ar:
+                    return jsonify({"error": "Access denied - not a member"}), 403
+                actor_role = ar
+
+            # Determine target current role
+            if user_id == 1:
+                target_role = 'SiteOwner'
+            elif timeline_created_by and user_id == timeline_created_by:
+                target_role = 'admin'
+            else:
+                tr = conn.execute(
+                    text("SELECT role FROM timeline_member WHERE timeline_id = :tid AND user_id = :uid"),
+                    {"tid": timeline_id, "uid": user_id}
+                ).scalar()
+                if not tr:
+                    return jsonify({"error": "Target member not found"}), 404
+                target_role = tr
+
+            # Permission check using shared helper
+            can_act, reason = can_act_on_member(current_user_id, actor_role, user_id, target_role, timeline_created_by)
+            if not can_act:
+                return jsonify({"error": f"Access denied: {reason}"}), 403
+
+            # Enforce one-step transitions server-side (no jumping)
+            role_rank = {'member': 1, 'moderator': 2, 'admin': 3, 'SiteOwner': 4}
+            curr_rank = role_rank.get(target_role, 0)
+            new_rank = role_rank.get(new_role, 0)
+            if target_role != 'SiteOwner':
+                if abs(new_rank - curr_rank) != 1:
+                    return jsonify({"error": "Invalid transition: role changes must be one step up or down"}), 400
+
+            # Update role
+            result = conn.execute(
+                text("UPDATE timeline_member SET role = :r WHERE timeline_id = :tid AND user_id = :uid"),
+                {"r": new_role, "tid": timeline_id, "uid": user_id}
+            )
+            if result.rowcount == 0:
+                return jsonify({"error": "Member not found"}), 404
+
+            # Return updated record
+            updated = conn.execute(
+                text("""
+                    SELECT tm.timeline_id, tm.user_id, tm.role, tm.is_active_member,
+                           u.username, u.avatar_url
+                    FROM timeline_member tm
+                    JOIN "user" u ON u.id = tm.user_id
+                    WHERE tm.timeline_id = :tid AND tm.user_id = :uid
+                """),
+                {"tid": timeline_id, "uid": user_id}
+            ).mappings().first()
+
+        return jsonify({
+            'timeline_id': updated['timeline_id'],
+            'user_id': updated['user_id'],
+            'role': updated['role'],
+            'is_active_member': bool(updated['is_active_member']),
+            'user': {
+                'username': updated['username'],
+                'avatar_url': updated['avatar_url'],
+            }
+        }), 200
+
+    except Exception as e:
+        logger.exception(f"Error updating member role: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/visibility', methods=['PUT'])
 @jwt_required()
