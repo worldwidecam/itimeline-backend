@@ -44,11 +44,19 @@ def get_user_passport():
                 }
             )
 
-            # Fetch passport
-            result = conn.execute(
-                text('SELECT user_id, memberships_json, last_updated FROM user_passport WHERE user_id = :uid'),
-                {'uid': current_user_id}
-            ).mappings().first()
+            # Fetch passport, prefer selecting preferences_json when available
+            result = None
+            try:
+                result = conn.execute(
+                    text('SELECT user_id, memberships_json, preferences_json, last_updated FROM user_passport WHERE user_id = :uid'),
+                    {'uid': current_user_id}
+                ).mappings().first()
+            except Exception:
+                # Backward compatibility: older schema without preferences_json
+                result = conn.execute(
+                    text('SELECT user_id, memberships_json, last_updated FROM user_passport WHERE user_id = :uid'),
+                    {'uid': current_user_id}
+                ).mappings().first()
 
             memberships = []
             if result and result.get('memberships_json'):
@@ -57,8 +65,17 @@ def get_user_passport():
                 except json.JSONDecodeError:
                     memberships = []
 
+            # Load preferences JSON (optional)
+            preferences = {}
+            if result and result.get('preferences_json'):
+                try:
+                    preferences = json.loads(result['preferences_json'])
+                except json.JSONDecodeError:
+                    preferences = {}
+
             return jsonify({
                 'memberships': memberships,
+                'preferences': preferences,
                 'last_updated': (result['last_updated'].isoformat() if result and result.get('last_updated') else datetime.now().isoformat())
             }), 200
         
@@ -168,3 +185,77 @@ def sync_user_passport():
     finally:
         if 'conn' in locals():
             conn.close()
+
+@passport_bp.route('/user/preferences', methods=['PUT'])
+@jwt_required()
+def update_user_preferences():
+    """
+    Update the current user's preferences stored in the passport.
+    Allowed fields: theme ('dark'|'light'), email_blur (bool)
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        data = request.get_json(silent=True) or {}
+
+        # Whitelist allowed keys and normalize values
+        allowed = {}
+        if 'theme' in data:
+            theme_val = str(data.get('theme', '')).lower()
+            if theme_val in ('dark', 'light'):
+                allowed['theme'] = theme_val
+        if 'email_blur' in data:
+            allowed['email_blur'] = bool(data.get('email_blur'))
+
+        if not allowed:
+            return jsonify({'message': 'No valid preference fields provided'}), 400
+
+        from app import db
+        with db.engine.begin() as conn:
+            # Ensure passport row exists
+            conn.execute(
+                text('''
+                    INSERT INTO user_passport (user_id, memberships_json, preferences_json, last_updated)
+                    VALUES (:uid, :mjson, :pjson, :lu)
+                    ON CONFLICT (user_id) DO NOTHING
+                '''),
+                {
+                    'uid': current_user_id,
+                    'mjson': '[]',
+                    'pjson': '{}',
+                    'lu': datetime.now()
+                }
+            )
+
+            # Load existing preferences
+            row = conn.execute(
+                text('SELECT preferences_json FROM user_passport WHERE user_id = :uid'),
+                {'uid': current_user_id}
+            ).mappings().first()
+            current_prefs = {}
+            if row and row.get('preferences_json'):
+                try:
+                    current_prefs = json.loads(row['preferences_json']) or {}
+                except json.JSONDecodeError:
+                    current_prefs = {}
+
+            # Merge
+            current_prefs.update(allowed)
+
+            # Persist
+            conn.execute(
+                text('''
+                    UPDATE user_passport
+                    SET preferences_json = :pjson, last_updated = :lu
+                    WHERE user_id = :uid
+                '''),
+                {
+                    'uid': current_user_id,
+                    'pjson': json.dumps(current_prefs),
+                    'lu': datetime.now()
+                }
+            )
+
+        return jsonify({'message': 'Preferences updated', 'preferences': current_prefs}), 200
+    except Exception as e:
+        logger.error(f"Error updating user preferences: {str(e)}")
+        return jsonify({'error': 'Failed to update preferences'}), 500
