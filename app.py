@@ -256,6 +256,7 @@ from routes.cloudinary import cloudinary_bp
 from routes.media import media_bp
 from routes.community import community_bp  # Re-enabled community blueprint
 from routes.passport import passport_bp
+from routes.reports import reports_bp
 
 # Register blueprints
 app.register_blueprint(upload_bp, url_prefix='/api')
@@ -267,6 +268,8 @@ app.register_blueprint(cloudinary_bp, url_prefix='/api')
 app.register_blueprint(community_bp, url_prefix='/api/v1')  # Register community routes
 # Ensure CORS is applied to this blueprint
 app.register_blueprint(passport_bp, url_prefix='/api/v1')
+# Reports (Manage Posts) placeholder endpoints
+app.register_blueprint(reports_bp, url_prefix='/api/v1')
 
 
 # Test endpoint for passport functionality
