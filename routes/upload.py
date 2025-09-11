@@ -30,7 +30,8 @@ def get_media_type(filename):
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or 'application/octet-stream'
 
-@upload_bp.route('/api/upload', methods=['POST'])
+@upload_bp.route('/upload', methods=['POST'])
+@upload_bp.route('/v1/upload', methods=['POST'])
 def upload_file():
     """
     Upload a file to Cloudinary and return the URL.
@@ -104,7 +105,8 @@ def upload_file():
     print(f"ERROR: File type not allowed for {file.filename}")
     return jsonify({'error': 'File type not allowed'}), 400
 
-@upload_bp.route('/api/upload-media', methods=['POST'])
+@upload_bp.route('/upload-media', methods=['POST'])
+@upload_bp.route('/v1/upload-media', methods=['POST'])
 def upload_media():
     """Upload media files for timeline events"""
     """

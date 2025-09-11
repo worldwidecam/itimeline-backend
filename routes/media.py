@@ -7,7 +7,8 @@ from datetime import datetime
 
 media_bp = Blueprint('media', __name__)
 
-@media_bp.route('/api/media-files', methods=['GET'])
+@media_bp.route('/media-files', methods=['GET'])
+@media_bp.route('/v1/media-files', methods=['GET'])
 def get_media_files():
     """
     Retrieve a list of media files from both Cloudinary and local storage

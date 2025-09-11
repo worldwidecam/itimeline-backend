@@ -71,159 +71,8 @@ cors = CORS(
 
 print(f"CORS configured with allowed origins: {', '.join(allowed_origins)}")
 
-# We'll add direct API endpoints for user passport instead of using blueprints
-print("Using direct API endpoints for user passport")
-
-@app.route('/api/v1/user/passport', methods=['GET'])
-@jwt_required()
-def get_user_passport():
-    """
-    Get the current user's passport containing all their timeline memberships.
-    This is fetched whenever a user logs in from any device.
-    """
-    try:
-        # Get current user ID from JWT
-        current_user_id = get_jwt_identity()
-
-        # Use raw SQL against db engine to avoid ORM cross-binding issues
-        with db.engine.begin() as conn:
-            row = conn.execute(text(
-                'SELECT user_id, memberships_json, last_updated FROM user_passport WHERE user_id = :uid'
-            ), { 'uid': current_user_id }).mappings().first()
-
-            if not row:
-                # Insert empty passport if not present
-                conn.execute(text(
-                    'INSERT INTO user_passport (user_id, memberships_json, last_updated) VALUES (:uid, :mjson, :lu)'
-                ), { 'uid': current_user_id, 'mjson': '[]', 'lu': datetime.now() })
-                return jsonify({
-                    'memberships': [],
-                    'last_updated': datetime.now().isoformat()
-                }), 200
-
-            # Parse memberships JSON safely
-            memberships_json = row['memberships_json'] if row['memberships_json'] is not None else '[]'
-            try:
-                memberships = json.loads(memberships_json)
-            except json.JSONDecodeError:
-                memberships = []
-
-            last_updated_val = row['last_updated']
-            if hasattr(last_updated_val, 'isoformat'):
-                last_updated_str = last_updated_val.isoformat()
-            else:
-                # Fallback if driver returns string
-                last_updated_str = str(last_updated_val) if last_updated_val else datetime.now().isoformat()
-
-            return jsonify({
-                'memberships': memberships,
-                'last_updated': last_updated_str
-            }), 200
-
-    except Exception as e:
-        logger.exception(f"Error getting user passport")
-        return jsonify({'error': 'Failed to get user passport'}), 500
-
-@app.route('/api/v1/user/passport/sync', methods=['POST'])
-@jwt_required()
-def sync_user_passport():
-    """
-    Sync the user's passport with the latest membership data.
-    This is called after any membership changes (join/leave community).
-    """
-    try:
-        # Get current user ID from JWT
-        current_user_id = get_jwt_identity()
-
-        memberships = []
-        with db.engine.begin() as conn:
-            # Active memberships
-            rows = conn.execute(text('''
-                SELECT tm.timeline_id, tm.role, tm.is_active_member, tm.joined_at,
-                       t.name AS timeline_name, t.visibility, t.timeline_type
-                FROM timeline_member tm
-                JOIN timeline t ON tm.timeline_id = t.id
-                WHERE tm.user_id = :uid AND tm.is_active_member = TRUE
-            '''), {'uid': current_user_id}).mappings().all()
-            for row in rows:
-                memberships.append({
-                    'timeline_id': row['timeline_id'],
-                    'role': row['role'],
-                    'is_active_member': bool(row['is_active_member']),
-                    'isMember': bool(row['is_active_member']),
-                    'joined_at': row['joined_at'].isoformat() if row['joined_at'] else None,
-                    'timeline_name': row['timeline_name'],
-                    'visibility': row['visibility'],
-                    'timeline_type': row['timeline_type']
-                })
-
-            # Timelines created by the user (implicit admin)
-            created_rows = conn.execute(text('''
-                SELECT id AS timeline_id, name AS timeline_name, visibility, timeline_type, created_at
-                FROM timeline
-                WHERE created_by = :uid AND id NOT IN (
-                    SELECT timeline_id FROM timeline_member WHERE user_id = :uid
-                )
-            '''), {'uid': current_user_id}).mappings().all()
-            for row in created_rows:
-                memberships.append({
-                    'timeline_id': row['timeline_id'],
-                    'role': 'admin',
-                    'is_active_member': True,
-                    'isMember': True,
-                    'joined_at': row['created_at'].isoformat() if row['created_at'] else None,
-                    'timeline_name': row['timeline_name'],
-                    'visibility': row['visibility'],
-                    'timeline_type': row['timeline_type'],
-                    'is_creator': True
-                })
-
-            # For SiteOwner (user ID 1), add access to all timelines
-            if int(current_user_id) == 1:
-                so_rows = conn.execute(text('''
-                    SELECT id AS timeline_id, name AS timeline_name, visibility, timeline_type, created_at
-                    FROM timeline
-                    WHERE id NOT IN (
-                        SELECT timeline_id FROM timeline_member WHERE user_id = 1
-                    )
-                ''')).mappings().all()
-                for row in so_rows:
-                    memberships.append({
-                        'timeline_id': row['timeline_id'],
-                        'role': 'SiteOwner',
-                        'is_active_member': True,
-                        'isMember': True,
-                        'joined_at': row['created_at'].isoformat() if row['created_at'] else None,
-                        'timeline_name': row['timeline_name'],
-                        'visibility': row['visibility'],
-                        'timeline_type': row['timeline_type'],
-                        'is_site_owner': True
-                    })
-
-            # Upsert passport
-            conn.execute(text('''
-                INSERT INTO user_passport (user_id, memberships_json, last_updated)
-                VALUES (:uid, :mjson, :lu)
-                ON CONFLICT (user_id)
-                DO UPDATE SET memberships_json = EXCLUDED.memberships_json, last_updated = EXCLUDED.last_updated
-            '''), {
-                'uid': current_user_id,
-                'mjson': json.dumps(memberships),
-                'lu': datetime.now()
-            })
-        
-        return jsonify({
-            'memberships': memberships,
-            'last_updated': datetime.now().isoformat(),
-            'message': 'Passport synced successfully'
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error syncing user passport: {str(e)}")
-        return jsonify({'error': 'Failed to sync user passport'}), 500
-    finally:
-        if 'conn' in locals():
-            conn.close()
+# Passport endpoints are provided via the `routes/passport.py` blueprint under `/api/v1`.
+print("Using passport blueprint for user passport endpoints under /api/v1")
 
 # Basic configurations
 app.config.update(
@@ -948,6 +797,7 @@ def serve_file(filename):
         return jsonify({'error': 'File not found or has been migrated to cloud storage'}), 404
 
 @app.route('/api/timeline', methods=['POST'])
+@app.route('/api/v1/timeline', methods=['POST'])
 def create_timeline():
     data = request.get_json()
     new_timeline = Timeline(
@@ -960,6 +810,7 @@ def create_timeline():
     return jsonify({'message': 'Timeline created successfully', 'id': new_timeline.id}), 201
 
 @app.route('/api/timeline/<int:timeline_id>', methods=['GET'])
+@app.route('/api/v1/timeline/<int:timeline_id>', methods=['GET'])
 def get_timeline(timeline_id):
     timeline = Timeline.query.get_or_404(timeline_id)
     return jsonify({
@@ -971,6 +822,7 @@ def get_timeline(timeline_id):
     })
 
 @app.route('/api/timeline/<int:timeline_id>/posts', methods=['GET'])
+@app.route('/api/v1/timeline/<int:timeline_id>/posts', methods=['GET'])
 def get_timeline_posts(timeline_id):
     posts = Post.query.filter_by(timeline_id=timeline_id).order_by(Post.event_date.desc()).all()
     return jsonify([{
@@ -991,6 +843,7 @@ def get_timeline_posts(timeline_id):
     } for post in posts])
 
 @app.route('/api/timeline/<int:timeline_id>/posts', methods=['POST'])
+@app.route('/api/v1/timeline/<int:timeline_id>/posts', methods=['POST'])
 def create_post(timeline_id):
     try:
         data = request.get_json()
@@ -1044,6 +897,7 @@ def create_post(timeline_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/posts', methods=['POST'])
+@app.route('/api/v1/posts', methods=['POST'])
 @jwt_required()
 def create_post_without_timeline():
     try:
@@ -1109,6 +963,7 @@ def create_post_without_timeline():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/posts', methods=['GET'])
+@app.route('/api/v1/posts', methods=['GET'])
 def get_all_posts():
     try:
         # Get query parameters for pagination
@@ -1171,6 +1026,7 @@ def get_all_posts():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/timeline/<int:timeline_id>/check-promotions', methods=['POST'])
+@app.route('/api/v1/timeline/<int:timeline_id>/check-promotions', methods=['POST'])
 def check_timeline_promotions(timeline_id):
     try:
         # Get timeline's posts ordered by promotion score
@@ -1242,6 +1098,7 @@ def vote_for_promotion(post_id):
         }), 500
 
 @app.route('/api/profile/music', methods=['POST'])
+@app.route('/api/v1/profile/music', methods=['POST'])
 @jwt_required()
 def update_music_preferences():
     try:
@@ -1333,6 +1190,7 @@ def update_music_preferences():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/profile/music', methods=['DELETE'])
+@app.route('/api/v1/profile/music', methods=['DELETE'])
 @jwt_required()
 def delete_music_preferences():
     try:
@@ -1381,6 +1239,7 @@ def delete_music_preferences():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/profile/music', methods=['GET'])
+@app.route('/api/v1/profile/music', methods=['GET'])
 @jwt_required()
 def get_music_preferences():
     try:
@@ -1407,6 +1266,7 @@ def get_music_preferences():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/users/<int:user_id>/music', methods=['GET'])
+@app.route('/api/v1/users/<int:user_id>/music', methods=['GET'])
 @jwt_required()
 def get_user_music(user_id):
     try:
@@ -1433,6 +1293,7 @@ def get_user_music(user_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/timelines/<int:timeline_id>', methods=['DELETE'])
+@app.route('/api/v1/timelines/<int:timeline_id>', methods=['DELETE'])
 @jwt_required()
 def delete_timeline(timeline_id):
     try:
@@ -1476,6 +1337,7 @@ def delete_timeline(timeline_id):
         return jsonify({'error': f'Failed to delete timeline: {str(e)}'}), 500
 
 @app.route('/api/timelines/merge', methods=['POST'])
+@app.route('/api/v1/timelines/merge', methods=['POST'])
 @jwt_required()
 def merge_timelines():
     try:
@@ -1514,6 +1376,7 @@ def merge_timelines():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/auth/register', methods=['POST'])
+@app.route('/api/v1/auth/register', methods=['POST'])
 def register():
     data = request.get_json()
     logger.info(f"Received registration request with data: {data}")
@@ -1574,6 +1437,7 @@ def register():
         return jsonify({'error': error_msg}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
+@app.route('/api/v1/auth/login', methods=['POST'])
 def login():
     try:
         data = request.get_json()
@@ -1619,6 +1483,7 @@ def login():
         return jsonify({'error': error_msg}), 500
 
 @app.route('/api/auth/refresh', methods=['POST'])
+@app.route('/api/v1/auth/refresh', methods=['POST'])
 def refresh():
     try:
         auth_header = request.headers.get('Authorization')
@@ -1648,6 +1513,7 @@ def refresh():
         return jsonify({'error': 'Failed to refresh token'}), 500
 
 @app.route('/api/auth/logout', methods=['POST'])
+@app.route('/api/v1/auth/logout', methods=['POST'])
 @jwt_required()
 def logout():
     try:
@@ -1665,6 +1531,7 @@ def logout():
         return jsonify({'error': 'Failed to logout'}), 500
 
 @app.route('/api/auth/validate', methods=['POST'])
+@app.route('/api/v1/auth/validate', methods=['POST'])
 @jwt_required()
 def validate_token():
     try:
@@ -1687,6 +1554,7 @@ def validate_token():
         return jsonify({'error': 'Failed to validate token'}), 500
 
 @app.route('/api/profile/update', methods=['POST'])
+@app.route('/api/v1/profile/update', methods=['POST'])
 @jwt_required()
 def update_profile():
     try:
@@ -1738,6 +1606,7 @@ def update_profile():
         return jsonify({'error': 'Failed to update profile'}), 500
 
 @app.route('/api/timeline-v3', methods=['GET'])
+@app.route('/api/v1/timeline-v3', methods=['GET'])
 def get_timelines_v3():
     try:
         timelines = Timeline.query.order_by(Timeline.created_at.desc()).all()
@@ -1754,6 +1623,7 @@ def get_timelines_v3():
         return jsonify({'error': 'Failed to fetch timelines'}), 500
 
 @app.route('/api/timeline-v3', methods=['POST'])
+@app.route('/api/v1/timeline-v3', methods=['POST'])
 @jwt_required()
 def create_timeline_v3():
     try:
@@ -1819,6 +1689,7 @@ def create_timeline_v3():
         return jsonify({'error': error_msg}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>', methods=['GET'])
+@app.route('/api/v1/timeline-v3/<timeline_id>', methods=['GET'])
 def get_timeline_v3(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
@@ -1851,6 +1722,7 @@ def get_timeline_v3(timeline_id):
         return jsonify({'error': 'Failed to fetch timeline'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>/add-event/<event_id>', methods=['POST'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/add-event/<event_id>', methods=['POST'])
 @jwt_required()
 def add_event_to_timeline(timeline_id, event_id):
     """
@@ -1914,6 +1786,7 @@ def add_event_to_timeline(timeline_id, event_id):
         return jsonify({'error': f'Failed to add event to timeline: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['GET'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/events', methods=['GET'])
 def get_timeline_v3_events(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
@@ -2005,6 +1878,7 @@ def get_timeline_v3_events(timeline_id):
         return jsonify({'error': f'Failed to get timeline events: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['POST'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/events', methods=['POST'])
 @jwt_required()
 def create_timeline_v3_event(timeline_id):
     # Get the current user's ID from the JWT token
@@ -2352,6 +2226,7 @@ def create_timeline_v3_event(timeline_id):
         return jsonify({'error': f'Failed to save event: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>', methods=['DELETE'])
+@app.route('/api/v1/timeline-v3/<timeline_id>', methods=['DELETE'])
 def delete_timeline_v3(timeline_id):
     try:
         app.logger.info(f'Deleting timeline {timeline_id}')
@@ -2394,6 +2269,7 @@ def delete_timeline_v3(timeline_id):
         return jsonify({'error': f'Failed to delete timeline: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/name/<string:timeline_name>', methods=['GET'])
+@app.route('/api/v1/timeline-v3/name/<string:timeline_name>', methods=['GET'])
 def get_timeline_v3_by_name(timeline_name):
     try:
         # Convert the timeline name to uppercase to match our standardized format

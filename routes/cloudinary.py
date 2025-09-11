@@ -7,6 +7,7 @@ cloudinary_bp = Blueprint('cloudinary', __name__)
 
 # Note: blueprint is registered with url_prefix='/api' in app.py, so do NOT include '/api' here
 @cloudinary_bp.route('/cloudinary/audio-files', methods=['GET'])
+@cloudinary_bp.route('/v1/cloudinary/audio-files', methods=['GET'])
 def get_audio_files():
     """
     Get a list of audio files from the Cloudinary timeline_forum/music folder
