@@ -2,12 +2,77 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, verify_jwt_in_request, get_jwt_identity
 from datetime import datetime
 import logging
+from sqlalchemy import text
+from utils.db_helper import get_db_engine
 
 # We import helpers from community routes for consistent access control semantics
 from routes.community import check_timeline_access, get_user_id
 
 reports_bp = Blueprint('reports', __name__)
 logger = logging.getLogger(__name__)
+
+
+def _ensure_reports_table(engine):
+    """Create the reports table and indexes if they don't already exist.
+    Non-destructive and safe to call repeatedly.
+    """
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                id SERIAL PRIMARY KEY,
+                timeline_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL,
+                reporter_id INTEGER NULL,
+                reason TEXT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                assigned_to INTEGER NULL,
+                resolution VARCHAR(16) NULL,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                resolved_at TIMESTAMP WITHOUT TIME ZONE NULL
+            );
+            """
+        ))
+        # Basic indexes for filters
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_timeline_status ON reports (timeline_id, status);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_status_created_at ON reports (status, created_at DESC);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_event_id ON reports (event_id);"))
+
+
+def _now_update_trigger(engine):
+    """Ensure updated_at auto-update via trigger for Postgres. No-op if already created.
+    Safe to attempt; if fails (e.g., not Postgres), we just ignore and update explicitly in code.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'update_updated_at_column') THEN
+                        CREATE OR REPLACE FUNCTION update_updated_at_column()
+                        RETURNS TRIGGER AS $$
+                        BEGIN
+                            NEW.updated_at = NOW();
+                            RETURN NEW;
+                        END;
+                        $$ language 'plpgsql';
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_trigger WHERE tgname = 'set_reports_updated_at'
+                    ) THEN
+                        CREATE TRIGGER set_reports_updated_at
+                        BEFORE UPDATE ON reports
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                    END IF;
+                END$$;
+                """
+            ))
+    except Exception as e:
+        # Likely running on SQLite/dev or missing perms; we will manage updated_at in code
+        logger.info(f"reports: skipping trigger setup ({e})")
 
 
 def _parse_paging_args():
@@ -47,18 +112,69 @@ def list_reports(timeline_id):
     status = _normalize_status(request.args.get('status'))
     page, page_size = _parse_paging_args()
 
-    # Placeholder data shape for frontend wiring
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _now_update_trigger(engine)
+
+    where_clause = "WHERE timeline_id = :timeline_id"
+    params = { 'timeline_id': timeline_id }
+    if status != 'all':
+        where_clause += " AND status = :status"
+        params['status'] = status
+
+    # Counts per status
+    with engine.begin() as conn:
+        counts = {}
+        for st in ['pending', 'reviewing', 'resolved']:
+            res = conn.execute(text("SELECT COUNT(*) FROM reports WHERE timeline_id = :tid AND status = :st"),
+                               {'tid': timeline_id, 'st': st}).scalar() or 0
+            counts[st] = int(res)
+        total_all = conn.execute(text("SELECT COUNT(*) FROM reports WHERE timeline_id = :tid"),
+                                 {'tid': timeline_id}).scalar() or 0
+
+        # Pagination
+        offset = (page - 1) * page_size
+        items = conn.execute(text(
+            f"""
+            SELECT id, timeline_id, event_id, reporter_id, reason, status, assigned_to, resolution,
+                   created_at, updated_at, resolved_at
+            FROM reports
+            {where_clause}
+            ORDER BY created_at DESC
+            LIMIT :limit OFFSET :offset
+            """
+        ), { **params, 'limit': page_size, 'offset': offset }).mappings().all()
+
+    # Shape payload
+    payload_items = []
+    for r in items:
+        payload_items.append({
+            'id': r['id'],
+            'timeline_id': r['timeline_id'],
+            'event_id': r['event_id'],
+            'reporter_id': r['reporter_id'],
+            'reason': r['reason'] or '',
+            'status': r['status'],
+            'assigned_to': r['assigned_to'],
+            'resolution': r['resolution'],
+            'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
+            'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
+            'resolved_at': (r['resolved_at'].isoformat() if r['resolved_at'] and hasattr(r['resolved_at'], 'isoformat') else (r['resolved_at'] and str(r['resolved_at']) or None)),
+            # Optional extras for UI
+            'event_type': None,
+        })
+
     data = {
-        'items': [],              # Array of report objects (empty for now)
-        'status': status,         # Echo filter
+        'items': payload_items,
+        'status': status,
         'page': page,
         'page_size': page_size,
-        'total': 0,               # Total matching items
-        'counts': {               # Tab counts for convenience
-            'all': 0,
-            'pending': 0,
-            'reviewing': 0,
-            'resolved': 0,
+        'total': total_all if status == 'all' else counts.get(status, 0),
+        'counts': {
+            'all': total_all,
+            'pending': counts.get('pending', 0),
+            'reviewing': counts.get('reviewing', 0),
+            'resolved': counts.get('resolved', 0),
         },
         'sort': {
             'field': 'reported_at',
@@ -87,25 +203,46 @@ def submit_report(timeline_id):
     data = request.get_json(silent=True) or {}
     event_id = data.get('event_id')
     reason = (data.get('reason') or '').strip()
+    category_raw = (data.get('category') or '').strip().lower()
+    allowed_categories = {'website_policy', 'government_policy', 'unethical_boundary'}
+    category = category_raw if category_raw in allowed_categories else None
 
     # Basic validation
     if not event_id:
         return jsonify({'error': 'event_id is required'}), 400
 
     logger.info(
-        f"REPORT submit placeholder: reporter={reporter_id if reporter_id is not None else 'anonymous'} "
-        f"timeline={timeline_id} event_id={event_id} reason_len={len(reason)}"
+        f"REPORT submit: reporter={reporter_id if reporter_id is not None else 'anonymous'} "
+        f"timeline={timeline_id} event_id={event_id} reason_len={len(reason)} category={category or 'none'}"
     )
 
-    # Placeholder response
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _now_update_trigger(engine)
+
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            INSERT INTO reports (timeline_id, event_id, reporter_id, reason, status)
+            VALUES (:timeline_id, :event_id, :reporter_id, :reason, 'pending')
+            RETURNING id, created_at
+            """
+        ), {
+            'timeline_id': timeline_id,
+            'event_id': int(event_id),
+            'reporter_id': reporter_id,
+            'reason': (f"[{category}] " if category else "") + reason,
+        }).mappings().first()
+
     return jsonify({
         'success': True,
         'timeline_id': timeline_id,
-        'event_id': event_id,
-        'reason': reason,
-        'reporter_id': reporter_id,  # can be None for anonymous
+        'event_id': int(event_id),
+        'reason': (f"[{category}] " if category else "") + reason,
+        'reporter_id': reporter_id,
         'status': 'pending',
-        'received_at': datetime.now().isoformat()
+        'report_id': row['id'],
+        'received_at': (row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']))
     }), 200
 
 
@@ -122,15 +259,29 @@ def accept_report(timeline_id, report_id):
         return jsonify({'error': 'Access denied'}), 403
 
     actor_id = get_user_id()
-    logger.info(f"ACCEPT report placeholder: actor={actor_id} timeline={timeline_id} report={report_id}")
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _now_update_trigger(engine)
+
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'reviewing', assigned_to = :actor, updated_at = NOW()
+            WHERE id = :rid AND timeline_id = :tid
+            RETURNING id, status, assigned_to, updated_at
+            """
+        ), {'actor': actor_id, 'rid': report_id, 'tid': timeline_id}).mappings().first()
+        if not res:
+            return jsonify({'error': 'Report not found'}), 404
 
     return jsonify({
-        'message': 'Accepted for review (placeholder)',
-        'report_id': report_id,
+        'message': 'Accepted for review',
+        'report_id': res['id'],
         'timeline_id': timeline_id,
-        'assigned_to': actor_id,
-        'new_status': 'reviewing',
-        'timestamp': datetime.now().isoformat()
+        'assigned_to': res['assigned_to'],
+        'new_status': res['status'],
+        'timestamp': (res['updated_at'].isoformat() if hasattr(res['updated_at'], 'isoformat') else str(res['updated_at']))
     }), 200
 
 
@@ -153,15 +304,29 @@ def resolve_report(timeline_id, report_id):
         return jsonify({'error': 'Invalid action'}), 400
 
     actor_id = get_user_id()
-    logger.info(f"RESOLVE report placeholder: actor={actor_id} timeline={timeline_id} report={report_id} action={action}")
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _now_update_trigger(engine)
+
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'resolved', resolution = :action, resolved_at = NOW(), updated_at = NOW(), assigned_to = COALESCE(assigned_to, :actor)
+            WHERE id = :rid AND timeline_id = :tid
+            RETURNING id, status, resolution, resolved_at
+            """
+        ), {'action': action, 'actor': actor_id, 'rid': report_id, 'tid': timeline_id}).mappings().first()
+        if not res:
+            return jsonify({'error': 'Report not found'}), 404
 
     return jsonify({
-        'message': f'Report resolved with action {action} (placeholder)',
-        'report_id': report_id,
+        'message': f'Report resolved with action {action}',
+        'report_id': res['id'],
         'timeline_id': timeline_id,
-        'action': action,
-        'new_status': 'resolved',
-        'timestamp': datetime.now().isoformat()
+        'action': res['resolution'],
+        'new_status': res['status'],
+        'resolved_at': (res['resolved_at'].isoformat() if hasattr(res['resolved_at'], 'isoformat') else str(res['resolved_at']))
     }), 200
 
 
