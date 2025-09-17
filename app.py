@@ -1877,6 +1877,77 @@ def get_timeline_v3_events(timeline_id):
         app.logger.error(f'Error getting timeline events: {str(e)}')
         return jsonify({'error': f'Failed to get timeline events: {str(e)}'}), 500
 
+@app.route('/api/timeline-v3/<timeline_id>/events/<event_id>', methods=['GET'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/events/<event_id>', methods=['GET'])
+def get_timeline_v3_event(timeline_id, event_id):
+    """
+    Return a single event by ID for a given timeline in the same shape
+    as get_timeline_v3_events items. This is used by Admin → Manage Posts
+    to open the relevant EventPopup without fetching the entire list.
+    """
+    # Normalize ids
+    if isinstance(timeline_id, str) and timeline_id.isdigit():
+        timeline_id = int(timeline_id)
+    if isinstance(event_id, str) and event_id.isdigit():
+        event_id = int(event_id)
+
+    try:
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({'error': 'Timeline not found'}), 404
+
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'error': 'Event not found'}), 404
+
+        # Ensure the event belongs to this timeline either directly or by reference
+        is_direct = (event.timeline_id == timeline_id)
+        is_referenced = False
+        try:
+            # referenced_events is used in get_timeline_v3_events
+            referenced = timeline.referenced_events.all()
+            is_referenced = any(ev.id == event.id for ev in referenced)
+        except Exception:
+            # If relationship access fails, do not hard fail; proceed with direct only
+            is_referenced = False
+
+        if not (is_direct or is_referenced):
+            return jsonify({'error': 'Event does not belong to this timeline'}), 404
+
+        # Tags
+        tags = [{'id': t.id, 'name': t.name} for t in event.tags]
+
+        # Creator info
+        creator = User.query.get(event.created_by)
+        creator_username = creator.username if creator else "Unknown"
+        creator_avatar = creator.avatar_url if creator else None
+
+        event_data = {
+            'id': event.id,
+            'title': event.title,
+            'description': event.description,
+            'event_date': event.event_date.isoformat() if event.event_date else None,
+            'type': event.type,
+            'url': event.url,
+            'url_title': event.url_title,
+            'url_description': event.url_description,
+            'url_image': event.url_image,
+            'media_url': event.media_url,
+            'media_type': event.media_type,
+            'timeline_id': event.timeline_id,
+            'created_by': event.created_by,
+            'created_by_username': creator_username,
+            'created_by_avatar': creator_avatar,
+            'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
+            'tags': tags
+        }
+
+        return jsonify(event_data), 200
+
+    except Exception as e:
+        app.logger.error(f'Error getting timeline event: {str(e)}')
+        return jsonify({'error': f'Failed to get event: {str(e)}'}), 500
+
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['POST'])
 @app.route('/api/v1/timeline-v3/<timeline_id>/events', methods=['POST'])
 @jwt_required()

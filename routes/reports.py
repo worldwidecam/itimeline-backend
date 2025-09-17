@@ -134,13 +134,29 @@ def list_reports(timeline_id):
 
         # Pagination
         offset = (page - 1) * page_size
+        # Include reporter username and avatar via LEFT JOIN to user table (non-breaking)
         items = conn.execute(text(
             f"""
-            SELECT id, timeline_id, event_id, reporter_id, reason, status, assigned_to, resolution,
-                   created_at, updated_at, resolved_at
-            FROM reports
-            {where_clause}
-            ORDER BY created_at DESC
+            SELECT r.id,
+                   r.timeline_id,
+                   r.event_id,
+                   r.reporter_id,
+                   r.reason,
+                   r.status,
+                   r.assigned_to,
+                   r.resolution,
+                   r.created_at,
+                   r.updated_at,
+                   r.resolved_at,
+                   u.username AS reporter_username,
+                   u.avatar_url AS reporter_avatar_url,
+                   a.username AS assigned_to_username,
+                   a.avatar_url AS assigned_to_avatar_url
+            FROM reports r
+            LEFT JOIN "user" u ON u.id = r.reporter_id
+            LEFT JOIN "user" a ON a.id = r.assigned_to
+            {where_clause.replace('WHERE', 'WHERE')}
+            ORDER BY r.created_at DESC
             LIMIT :limit OFFSET :offset
             """
         ), { **params, 'limit': page_size, 'offset': offset }).mappings().all()
@@ -153,9 +169,13 @@ def list_reports(timeline_id):
             'timeline_id': r['timeline_id'],
             'event_id': r['event_id'],
             'reporter_id': r['reporter_id'],
+            'reporter_username': r.get('reporter_username'),
+            'reporter_avatar_url': r.get('reporter_avatar_url'),
             'reason': r['reason'] or '',
             'status': r['status'],
             'assigned_to': r['assigned_to'],
+            'assigned_to_username': r.get('assigned_to_username'),
+            'assigned_to_avatar_url': r.get('assigned_to_avatar_url'),
             'resolution': r['resolution'],
             'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
             'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
