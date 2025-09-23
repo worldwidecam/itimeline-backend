@@ -1,8 +1,22 @@
 # iTimeline User Passport Implementation - Goal Plan
 
+## Executive Summary (2025-09-23)
+- **Main Goal**: Community timeline implementation
+- **Child Goals (completed)**: Member page
+- **Current Child Goal**: Admin page implementation
+- **Grandchild Goals (completed)**: Manage Members tab
+  - a) Active Members tab working
+  - b) Blocked Members tab working
+- **Current Grandchild Goal**: Manage Posts tab
+  - a) Reporting system — in place
+  - b) Remove from community — COMPLETED (chips cross out; event unshared from target community only; persists across views)
+  - c) DELETE post — PENDING
+  - d) SAFEGUARD post — PENDING
+
 ## Concise Status (2025-09-03)
 - **What we're working on**: Community admin actions (Remove/Kick, Block, Unblock) and User Passport stability
 - **Finished**: UserPassport model/table; community blueprint registered in `app.py`; admin/member routes active; duplicate passport routes removed from `app.py` (single source in `routes/passport.py`)
+- **Newly finished (2025-09-23)**: Report resolve → Remove now works end-to-end via `timeline_block_list` (unshares from a single community timeline; chips cross out across views; event remains visible elsewhere). Legacy single-timeline guard removed; relaxed "exists elsewhere" rule enforced safely.
 - **Current focus/problems**:
   - Block foundation implemented: Blocked state persists after refresh/sessions when client calls `POST /api/v1/user/passport/sync`.
   - 403 on `GET /api/v1/timelines/{id}/blocked-members` for non-privileged users is expected per `check_timeline_access()`.
@@ -14,13 +28,12 @@
 - **Backend**: Removed sqlite in passport routes; now use `db.engine.begin()` + `text()` with Postgres, `ON CONFLICT` upsert for `user_passport`
 - **Runtime**: Backend runs against local Postgres via `DATABASE_URL`; frontend Vite dev server running and hitting backend
 
-### Next Step — Remove/Block Intent vs Current Behavior
-1) **DELETE route under `/api/v1` is active**
-   - `community_bp` is registered in `app.py` with `url_prefix='/api/v1'`, so `DELETE /api/v1/timelines/<timeline_id>/members/<user_id>` is live.
-   - Current behavior: sets `is_active_member = FALSE` AND `is_blocked = TRUE` (acts like a block/ban, not a kick).
-2) **On successful DELETE**: Client should trigger `POST /api/v1/user/passport/sync` to persist membership changes.
+### Progress Today (2025-09-23)
+- **Backend**: Stabilized `routes/reports.py` resolve/remove to avoid transaction aborts (removed DO $$ blocks during requests; added table-existence checks; per-name timeline matching). Implemented `timeline_block_list` usage for removal without schema changes.
+- **Frontend**: Ensured `removedTimelineIds` is passed to `TagList` across event cards so removed chips cross out consistently.
 
-Mini-roadmap for alignment:
+### Next Step
+- [ ] DELETE POST button implementation (Manage Posts tab)
 - [ ] Add log lines in DELETE/BLOCK/UNBLOCK handlers to capture actor/target and decision
 - [ ] Verify `GET /api/v1/timelines/{id}/members` excludes `is_blocked = TRUE`
 - [ ] Verify `GET /api/v1/timelines/{id}/blocked-members` lists only `is_blocked = TRUE`
