@@ -1,3 +1,22 @@
+def ensure_timeline_block_list_table():
+    """Create the timeline_block_list table if it does not exist (PostgreSQL)."""
+    try:
+        from sqlalchemy import text as _sql_text
+        db.session.execute(_sql_text(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_block_list (
+                event_id INTEGER NOT NULL,
+                timeline_id INTEGER NOT NULL,
+                removed_by INTEGER NULL,
+                removed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (event_id, timeline_id)
+            )
+            """
+        ))
+        db.session.commit()
+    except Exception as _e:
+        app.logger.info(f"ensure_timeline_block_list_table skipped or failed: {_e}")
+
 from flask import Flask, request, jsonify, send_from_directory, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import (
@@ -49,14 +68,17 @@ app = Flask(__name__)
 # Configure CORS to allow frontend to access backend resources
 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 allowed_origins = [
-    frontend_url, 
-    'http://localhost:3000', 
-    'http://localhost:3001', 
+    frontend_url,
+    'http://localhost:3000',
+    'http://localhost:3001',
     'https://i-timeline.com',
     'https://www.i-timeline.com',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:5000',
-    'http://localhost:5000'
+    'http://localhost:5000',
+    # Allow any localhost/127.0.0.1 port during development (regex strings supported by Flask-CORS)
+    r"^https?://localhost:\d+$",
+    r"^https?://127\.0\.0\.1:\d+$",
 ]
 
 # Enable CORS – reflect specific allowed origins when using credentials
@@ -901,7 +923,7 @@ def create_post(timeline_id):
 @jwt_required()
 def create_post_without_timeline():
     try:
-        current_user_id = get_jwt_identity()
+        current_user_id = int(get_jwt_identity())
         data = request.get_json()
 
         title = data.get('title')
@@ -1806,6 +1828,30 @@ def get_timeline_v3_events(timeline_id):
         
         # Combine both sets of events
         all_events = direct_events + referenced_events
+
+        # Filter out events that were removed from this timeline via resolved reports
+        try:
+            from sqlalchemy import text as _sql_text
+            pruned = []
+            for ev in all_events:
+                # Skip if a resolved 'remove' exists for (timeline_id,event_id)
+                q = db.session.execute(_sql_text(
+                    """
+                    SELECT 1
+                    FROM reports
+                    WHERE timeline_id = :tid
+                      AND event_id = :eid
+                      AND status = 'resolved'
+                      AND resolution = 'remove'
+                    LIMIT 1
+                    """
+                ), { 'tid': timeline_id, 'eid': ev.id }).first()
+                if q:
+                    continue
+                pruned.append(ev)
+            all_events = pruned
+        except Exception as _e:
+            app.logger.info(f"Skipping removed-events filter due to error: {_e}")
         
         # Get tag filter from query parameters
         tag_filter = request.args.get('tag')
@@ -1843,7 +1889,59 @@ def get_timeline_v3_events(timeline_id):
             for tag in event.tags:
                 app.logger.info(f"Processing tag: {tag.name} (ID: {tag.id})")
                 tags.append({'id': tag.id, 'name': tag.name})
-            
+
+            # Build associated_timelines: include owning timeline, explicit associations, and hashtag timelines derived from tags
+            associated_timelines = []
+            try:
+                from sqlalchemy import text as _sql_text
+                # Fetch associated timeline IDs (owning + associations)
+                id_rows = db.session.execute(_sql_text(
+                    """
+                    SELECT DISTINCT timeline_id AS tid FROM event_timeline_association WHERE event_id = :eid
+                    UNION
+                    SELECT timeline_id AS tid FROM event WHERE id = :eid
+                    """
+                ), { 'eid': event.id }).all()
+                assoc_ids = [int(r[0]) for r in id_rows if r and r[0] is not None]
+                # Also include hashtag timelines whose name matches this event's tags (case-insensitive)
+                if event.tags:
+                    tag_names = [t.name for t in event.tags if getattr(t, 'name', None)]
+                    if tag_names:
+                        tl_hash_rows = db.session.execute(_sql_text(
+                            """
+                            SELECT id, name, timeline_type FROM timeline
+                            WHERE LOWER(name) = ANY(:names)
+                            """
+                        ), { 'names': [str(n).lower() for n in tag_names] }).mappings().all()
+                        for tl in tl_hash_rows:
+                            assoc_ids.append(int(tl['id']))
+                # De-duplicate
+                assoc_ids = sorted(set(assoc_ids))
+                if assoc_ids:
+                    # Fetch timeline details in one query
+                    tl_rows = db.session.execute(_sql_text(
+                        """
+                        SELECT id, name, timeline_type FROM timeline WHERE id = ANY(:ids)
+                        """
+                    ), { 'ids': assoc_ids }).mappings().all()
+                    for tl in tl_rows:
+                        associated_timelines.append({
+                            'id': int(tl['id']),
+                            'name': tl['name'],
+                            'type': tl.get('timeline_type') or 'hashtag'
+                        })
+                # Fetch removed timeline ids for this event from block list
+                ensure_timeline_block_list_table()
+                rm_rows = db.session.execute(_sql_text(
+                    """
+                    SELECT timeline_id FROM timeline_block_list WHERE event_id = :eid
+                    """
+                ), { 'eid': event.id }).all()
+                removed_timeline_ids = [int(r[0]) for r in rm_rows]
+            except Exception as _e:
+                app.logger.info(f"Skipping associated_timelines build due to error: {_e}")
+                removed_timeline_ids = []
+
             # Get the creator's username
             creator = User.query.get(event.created_by)
             creator_username = creator.username if creator else "Unknown"
@@ -1866,8 +1964,12 @@ def get_timeline_v3_events(timeline_id):
                 'created_by': event.created_by,
                 'created_by_username': creator_username,
                 'created_by_avatar': creator_avatar,
-                'created_at': event.created_at.isoformat(),
-                'tags': tags
+                'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
+                'tags': tags,
+                'associated_timelines': associated_timelines,
+                # List endpoint has no per-timeline removal context; default to False
+                'removed_from_this_timeline': False,
+                'removed_timeline_ids': removed_timeline_ids
             }
             events_json.append(event_data)
         
@@ -1911,11 +2013,83 @@ def get_timeline_v3_event(timeline_id, event_id):
             # If relationship access fails, do not hard fail; proceed with direct only
             is_referenced = False
 
-        if not (is_direct or is_referenced):
+        # Determine if this event was explicitly removed from this timeline via reports
+        removed_for_timeline = False
+        try:
+            from sqlalchemy import text as _sql_text
+            rm = db.session.execute(_sql_text(
+                """
+                SELECT 1
+                FROM reports
+                WHERE timeline_id = :tid
+                  AND event_id = :eid
+                  AND status = 'resolved'
+                  AND resolution = 'remove'
+                LIMIT 1
+                """
+            ), { 'tid': timeline_id, 'eid': event_id }).first()
+            removed_for_timeline = bool(rm)
+        except Exception as _e:
+            app.logger.info(f"Removed check failed (proceeding): {_e}")
+
+        # Allow fetch even if removed_for_timeline (so Admin can still view via ticket),
+        # but if it neither belongs directly nor by reference AND not removed_for_timeline, 404
+        if not (is_direct or is_referenced or removed_for_timeline):
             return jsonify({'error': 'Event does not belong to this timeline'}), 404
 
         # Tags
         tags = [{'id': t.id, 'name': t.name} for t in event.tags]
+
+        # Build associated_timelines: include owning timeline, explicit associations, and hashtag timelines derived from tags
+        associated_timelines = []
+        try:
+            from sqlalchemy import text as _sql_text
+            # Fetch associated timeline IDs (owning + associations)
+            id_rows = db.session.execute(_sql_text(
+                """
+                SELECT DISTINCT timeline_id AS tid FROM event_timeline_association WHERE event_id = :eid
+                UNION
+                SELECT timeline_id AS tid FROM event WHERE id = :eid
+                """
+            ), { 'eid': event_id }).all()
+            assoc_ids = [int(r[0]) for r in id_rows if r and r[0] is not None]
+            # Also include hashtag timelines matched by tag names for this event
+            if event.tags:
+                tag_names = [t.name for t in event.tags if getattr(t, 'name', None)]
+                if tag_names:
+                    tl_hash_rows = db.session.execute(_sql_text(
+                        """
+                        SELECT id, name, timeline_type FROM timeline
+                        WHERE LOWER(name) = ANY(:names)
+                        """
+                    ), { 'names': [str(n).lower() for n in tag_names] }).mappings().all()
+                    for tl in tl_hash_rows:
+                        assoc_ids.append(int(tl['id']))
+            # De-duplicate
+            assoc_ids = sorted(set(assoc_ids))
+            if assoc_ids:
+                tl_rows = db.session.execute(_sql_text(
+                    """
+                    SELECT id, name, timeline_type FROM timeline WHERE id = ANY(:ids)
+                    """
+                ), { 'ids': assoc_ids }).mappings().all()
+                for tl in tl_rows:
+                    associated_timelines.append({
+                        'id': int(tl['id']),
+                        'name': tl['name'],
+                        'type': tl.get('timeline_type') or 'hashtag'
+                    })
+            # Block list: get removed timeline ids for this event
+            ensure_timeline_block_list_table()
+            rm_rows = db.session.execute(_sql_text(
+                """
+                SELECT timeline_id FROM timeline_block_list WHERE event_id = :eid
+                """
+            ), { 'eid': event_id }).all()
+            removed_timeline_ids = [int(r[0]) for r in rm_rows]
+        except Exception as _e:
+            app.logger.info(f"Skipping associated_timelines build due to error: {_e}")
+            removed_timeline_ids = []
 
         # Creator info
         creator = User.query.get(event.created_by)
@@ -1939,7 +2113,10 @@ def get_timeline_v3_event(timeline_id, event_id):
             'created_by_username': creator_username,
             'created_by_avatar': creator_avatar,
             'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
-            'tags': tags
+            'tags': tags,
+            'associated_timelines': associated_timelines,
+            'removed_from_this_timeline': removed_for_timeline,
+            'removed_timeline_ids': removed_timeline_ids
         }
 
         return jsonify(event_data), 200
