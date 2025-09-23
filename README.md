@@ -66,6 +66,19 @@ cors = CORS(
 - CORS support for cross-domain requests
 - User-specific membership persistence with Passport system
 
+### Manage Posts (Reports) — Admin
+- Backend route group: `routes/reports.py` (blueprint `reports_bp` registered under `/api/v1`)
+- Primary endpoint used by Admin > Manage Posts > Report Ticket:
+  - `POST /api/v1/timelines/{timelineId}/reports/{reportId}/resolve`
+    - Body: `{ action: 'remove' | 'delete' | 'safeguard', verdict: string }`
+    - `remove` (completed): Unshares the event from the current community only.
+      - Implementation uses `timeline_block_list` as the source of truth (non-destructive to the event).
+      - Robust “exists elsewhere” rule: allowed if the event exists on another active timeline OR has ≥ 2 tags.
+      - Response includes: `blocked: true`, `removed_timeline_ids`, `deleted_assoc_count` (cleanup only).
+    - `delete` (paused for product design): Fully removes the event and related rows. Implemented defensively but gated by product decision.
+    - `safeguard` (planned): Will protect an event from removal.
+- Frontend usage: Admin Panel → Manage Posts tab (remove action crosses out the community chip across views)
+
 ### Community Admin Access UX (Frontend)
 - The frontend now includes a `CommunityLockView` and an AdminPanel access-loading guard to prevent unauthorized content flashes during access checks.
 - No backend route or schema changes were required for this UX improvement; existing membership and role checks remain the source of truth.

@@ -337,6 +337,11 @@ def resolve_report(timeline_id, report_id):
     full_delete_required = False
     full_delete_reason = None
     event_id_for_report = None
+    # Deletion metrics (populated when action == 'delete')
+    deleted_event = False
+    deleted_assoc_total = None
+    deleted_tags_total = None
+    deleted_blocklist_total = None
 
     with engine.begin() as conn:
         # Fetch the event_id for this report first
@@ -503,6 +508,71 @@ def resolve_report(timeline_id, report_id):
                 full_delete_required = True
                 full_delete_reason = 'Event is blocked on all timelines'
 
+        elif action == 'delete':
+            # Perform a full delete of the event and related records
+            from sqlalchemy import text as _sql_text
+            # Best-effort deletes guarded by table existence
+            def _reg_exists(tbl: str) -> bool:
+                try:
+                    rr = conn.execute(_sql_text("SELECT to_regclass(:t)"), { 't': f'public.{tbl}' }).first()
+                    return bool(rr and rr[0])
+                except Exception:
+                    return False
+
+            # Delete associations to timelines
+            deleted_assoc_total = 0
+            if _reg_exists('event_timeline_association'):
+                try:
+                    res_a = conn.execute(_sql_text(
+                        "DELETE FROM event_timeline_association WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_assoc_total = int(getattr(res_a, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            # Delete tag links (support both event_tags and event_tag)
+            deleted_tags_total = 0
+            if _reg_exists('event_tags'):
+                try:
+                    res_t = conn.execute(_sql_text(
+                        "DELETE FROM event_tags WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_tags_total += int(getattr(res_t, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+            elif _reg_exists('event_tag'):
+                try:
+                    res_t = conn.execute(_sql_text(
+                        "DELETE FROM event_tag WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_tags_total += int(getattr(res_t, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            # Delete blocklist entries
+            deleted_blocklist_total = 0
+            if _reg_exists('timeline_block_list'):
+                try:
+                    res_b = conn.execute(_sql_text(
+                        "DELETE FROM timeline_block_list WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_blocklist_total = int(getattr(res_b, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            # Finally delete the event itself
+            try:
+                res_e = conn.execute(_sql_text(
+                    "DELETE FROM event WHERE id = :eid"
+                ), { 'eid': event_id_for_report })
+                deleted_event = (getattr(res_e, 'rowcount', 0) or 0) > 0
+            except Exception:
+                deleted_event = False
+
+            # For delete, by definition, nothing remains
+            full_delete_required = False
+            full_delete_reason = None
+
         # Fetch removed_timeline_ids for response context (must stay inside the connection scope)
         try:
             from sqlalchemy import text as _sql_text
@@ -525,7 +595,10 @@ def resolve_report(timeline_id, report_id):
         'full_delete_reason': full_delete_reason,
         'event_id': event_id_for_report,
         # For observability in clients/tests when action == 'remove'
-        'deleted_assoc_count': (deleted_assoc_count if action == 'remove' else None),
+        'deleted_assoc_count': (deleted_assoc_count if action == 'remove' else deleted_assoc_total if action == 'delete' else None),
+        'deleted_tags_count': (deleted_tags_total if action == 'delete' else None),
+        'deleted_blocklist_count': (deleted_blocklist_total if action == 'delete' else None),
+        'deleted_event': (deleted_event if action == 'delete' else None),
         'blocked': (True if action == 'remove' else False),
         'removed_timeline_ids': removed_timeline_ids_resp
     }), 200
