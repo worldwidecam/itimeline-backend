@@ -28,7 +28,7 @@
 - [ ] UNDER REVIEW icon implementation
 
 
-#### NOTES
+#### APPENDIX: NOTES
 - Passport endpoints now use `utils/db_helper.get_db_engine()` to avoid Flask-SQLAlchemy app-context coupling.
 - Report removal does not mutate schema and relies on `timeline_block_list` (created if missing by backend safety checks).
 - DELETE Post feature progress (paused pending product spec):
@@ -37,6 +37,31 @@
   - Response includes delete metrics: `deleted_event`, `deleted_assoc_count`, `deleted_tags_count`, `deleted_blocklist_count`.
   - No schema changes were introduced; entirely runtime-safe.
   - README updated with Manage Posts flow; delete marked as “paused for product design”.
+ 
+ - DELETE Button — Current Implementation Assessment (2025-09-23)
+   - Behavior (in `routes/reports.py#resolve_report()` when `action: "delete"`):
+     - Marks the report as `resolved` with `resolution = 'delete'` and requires a non-empty `verdict` string.
+     - Performs best‑effort, global deletion of the underlying event and related rows:
+       - Deletes from `event_timeline_association` (all timelines for that event).
+       - Deletes tag links from either `event_tags` or `event_tag` (whichever table exists).
+       - Deletes any `timeline_block_list` entries for the event.
+       - Deletes the `event` row itself.
+     - All deletions are guarded via `to_regclass` checks to avoid transaction aborts if a table is absent.
+     - Access control enforced: moderator+ only via `check_timeline_access(..., required_role='moderator')`.
+   - Response fields (delete action):
+     - `deleted_event` (boolean), `deleted_assoc_count`, `deleted_tags_count`, `deleted_blocklist_count`.
+     - `report_id`, `timeline_id`, `action`, `verdict`, `new_status`, `resolved_at`, `event_id`.
+     - `full_delete_required` is always `false` for delete (not applicable; full delete is the action itself).
+   - Considerations:
+     - This is a global deletion (removes the event from all timelines), unlike `remove` which only unshares from the current timeline.
+     - Product policy decision is required before enabling UI: criteria for when a global delete is permitted vs. a per‑timeline remove or safeguard.
+     - Auditability: `verdict` is stored on the `reports` row; no separate audit log table is used.
+     - Concurrency: guarded with best‑effort checks; no explicit locks beyond transaction scope.
+   - Limitations / Not implemented:
+     - No media file deletion is performed (e.g., Cloudinary or local uploads) — only database rows are deleted.
+     - No soft‑delete/archival path; deletion is destructive at the DB row level.
+     - No cross‑timeline notification or cascade beyond DB row removals.
+     - No UI wiring by design yet (DELETE remains gated/paused pending product approval).
 
 ### Completed Tasks
 
