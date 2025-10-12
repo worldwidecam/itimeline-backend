@@ -1743,6 +1743,91 @@ def get_timeline_v3(timeline_id):
         app.logger.error(f'Error fetching timeline: {str(e)}')
         return jsonify({'error': 'Failed to fetch timeline'}), 500
 
+@app.route('/api/timeline-v3/<timeline_id>', methods=['PUT'])
+@app.route('/api/v1/timeline-v3/<timeline_id>', methods=['PUT'])
+@jwt_required()
+def update_timeline_v3(timeline_id):
+    """
+    Update timeline details (currently only description)
+    
+    TODO: Name editing will be added later after implementing per-type uniqueness
+    (Only one #News globally, but #News and i-News can coexist)
+    """
+    try:
+        # Get current user from JWT token
+        current_user_id = get_jwt_identity()
+        logger.info(f"User {current_user_id} attempting to update timeline {timeline_id}")
+        
+        # Convert timeline_id to integer if it's numeric
+        if isinstance(timeline_id, str) and timeline_id.isdigit():
+            timeline_id = int(timeline_id)
+        
+        # Get the timeline
+        timeline = Timeline.query.get_or_404(timeline_id)
+        
+        # Check if user has permission to update (must be creator or admin)
+        if timeline.timeline_type == 'community':
+            # For community timelines, check membership role
+            member = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=current_user_id
+            ).first()
+            
+            if not member:
+                return jsonify({'error': 'You are not a member of this timeline'}), 403
+            
+            # Only admin, creator, or siteowner can update
+            allowed_roles = ['admin', 'creator', 'siteowner']
+            if member.role.lower() not in allowed_roles:
+                return jsonify({'error': 'You do not have permission to update this timeline'}), 403
+        else:
+            # For hashtag timelines, only creator can update
+            if timeline.created_by != current_user_id:
+                return jsonify({'error': 'Only the timeline creator can update this timeline'}), 403
+        
+        # Get update data
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Update description if provided
+        if 'description' in data:
+            timeline.description = data.get('description', '')
+            logger.info(f"Updated description for timeline {timeline_id}")
+        
+        # TODO: Add name updating here after implementing per-type uniqueness constraint
+        # if 'name' in data:
+        #     new_name = data['name']
+        #     # Check if name already exists for this timeline_type
+        #     existing = Timeline.query.filter_by(
+        #         name=new_name,
+        #         timeline_type=timeline.timeline_type
+        #     ).first()
+        #     if existing and existing.id != timeline.id:
+        #         return jsonify({'error': 'A timeline with this name already exists'}), 400
+        #     timeline.name = new_name
+        
+        db.session.commit()
+        
+        # Return updated timeline data
+        created_at_str = timeline.created_at.isoformat() if timeline.created_at else datetime.now().isoformat()
+        
+        return jsonify({
+            'id': timeline.id,
+            'name': timeline.name,
+            'description': timeline.description or '',
+            'created_by': timeline.created_by,
+            'created_at': created_at_str,
+            'timeline_type': timeline.timeline_type or 'hashtag',
+            'visibility': timeline.visibility or 'public'
+        }), 200
+        
+    except Exception as e:
+        error_msg = f"Failed to update timeline: {str(e)}"
+        logger.error(error_msg)
+        db.session.rollback()
+        return jsonify({'error': error_msg}), 500
+
 @app.route('/api/timeline-v3/<timeline_id>/add-event/<event_id>', methods=['POST'])
 @app.route('/api/v1/timeline-v3/<timeline_id>/add-event/<event_id>', methods=['POST'])
 @jwt_required()
