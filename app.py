@@ -1730,6 +1730,23 @@ def get_timeline_v3(timeline_id):
         else:
             created_at_str = datetime.now().isoformat()  # Use current time if None
         
+        # Handle privacy_changed_at datetime
+        privacy_changed_at_str = None
+        if hasattr(timeline, 'privacy_changed_at') and timeline.privacy_changed_at:
+            try:
+                privacy_changed_at_str = timeline.privacy_changed_at.isoformat()
+            except (AttributeError, ValueError) as dt_error:
+                print(f"Warning: Invalid privacy_changed_at for timeline {timeline_id}: {dt_error}")
+        
+        # Get member count for community timelines
+        member_count = 0
+        if timeline.timeline_type == 'community':
+            # TimelineMember is already defined in this file
+            member_count = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                is_active_member=True
+            ).count()
+        
         return jsonify({
             'id': timeline.id,
             'name': timeline.name,
@@ -1737,7 +1754,9 @@ def get_timeline_v3(timeline_id):
             'created_by': timeline.created_by,
             'created_at': created_at_str,
             'timeline_type': timeline.timeline_type or 'hashtag',
-            'visibility': timeline.visibility or 'public'
+            'visibility': timeline.visibility or 'public',
+            'privacy_changed_at': privacy_changed_at_str,
+            'member_count': member_count
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline: {str(e)}')

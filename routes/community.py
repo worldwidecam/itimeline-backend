@@ -149,7 +149,7 @@ def check_timeline_access(timeline_id, required_role=None):
         with engine.begin() as conn:
             # Get timeline information
             timeline_row = conn.execute(
-                text("SELECT id, created_by, name, description, visibility FROM timeline WHERE id = :tid"),
+                text("SELECT id, created_by, name, description, visibility, privacy_changed_at FROM timeline WHERE id = :tid"),
                 {"tid": timeline_id}
             ).mappings().first()
             if not timeline_row:
@@ -1042,7 +1042,18 @@ def update_member_role(timeline_id, user_id):
         logger.exception(f"Error updating member role: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@community_bp.route('/timelines/<int:timeline_id>/visibility', methods=['PUT'])
+@community_bp.route('/timelines/<int:timeline_id>/visibility', methods=['PUT', 'OPTIONS'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['PUT', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
 @jwt_required()
 def update_timeline_visibility(timeline_id):
     """Update a timeline's visibility (public/private)"""
@@ -1062,13 +1073,19 @@ def update_timeline_visibility(timeline_id):
         return jsonify({"error": "Invalid visibility"}), 400
     
     # Check if visibility is changing
-    if timeline.visibility == new_visibility:
+    if timeline["visibility"] == new_visibility:
         return jsonify({"message": "Visibility unchanged"}), 200
     
-    # Check cooldown period if changing to private
-    if new_visibility == 'private' and timeline.privacy_changed_at:
+    # Check cooldown period - prevent changing FROM private back to public too quickly
+    # The cooldown applies when trying to go back to public after being private
+    if timeline["visibility"] == 'private' and new_visibility == 'public' and timeline["privacy_changed_at"]:
         cooldown_days = 10
-        cooldown_end = timeline.privacy_changed_at + timedelta(days=cooldown_days)
+        # Convert string to datetime if needed
+        privacy_changed = timeline["privacy_changed_at"]
+        if isinstance(privacy_changed, str):
+            privacy_changed = datetime.fromisoformat(privacy_changed.replace('Z', '+00:00'))
+        
+        cooldown_end = privacy_changed + timedelta(days=cooldown_days)
         
         if datetime.now() < cooldown_end:
             days_left = (cooldown_end - datetime.now()).days + 1
@@ -1076,13 +1093,47 @@ def update_timeline_visibility(timeline_id):
                 "error": f"Cannot change visibility yet. Please wait {days_left} more days."
             }), 400
     
-    # Update visibility
-    timeline.visibility = new_visibility
-    timeline.privacy_changed_at = datetime.now()
-    db.session.commit()
+    # Update visibility using raw SQL since timeline is a row mapping
+    from sqlalchemy import text
     
-    result = timeline_schema.dump(timeline)
-    return jsonify(result), 200
+    # Get engine using the same method as check_timeline_access
+    sa_ext = current_app.extensions.get('sqlalchemy')
+    engine = None
+    if sa_ext is None:
+        logger.warning("update_timeline_visibility: sqlalchemy extension not found")
+    else:
+        if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+            engine = sa_ext.db.engine
+        elif hasattr(sa_ext, 'engine'):
+            engine = sa_ext.engine
+        elif hasattr(sa_ext, 'engines'):
+            try:
+                engine = sa_ext.engines[current_app]
+            except Exception as e:
+                logger.warning(f"update_timeline_visibility: failed sa_ext.engines lookup: {e}")
+    
+    if engine is None:
+        try:
+            from app import db as app_db
+            engine = app_db.engine
+        except Exception as e:
+            logger.exception(f"update_timeline_visibility: failed to obtain engine: {e}")
+            return jsonify({"error": "Database error"}), 500
+    
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE timeline SET visibility = :vis, privacy_changed_at = :changed_at WHERE id = :tid"),
+            {"vis": new_visibility, "changed_at": datetime.now(), "tid": timeline_id}
+        )
+    
+    # Return updated timeline data
+    return jsonify({
+        "id": timeline["id"],
+        "name": timeline["name"],
+        "description": timeline["description"],
+        "visibility": new_visibility,
+        "privacy_changed_at": datetime.now().isoformat()
+    }), 200
 
 @community_bp.route('/timelines/<int:timeline_id>/access-requests', methods=['POST'])
 @jwt_required()
