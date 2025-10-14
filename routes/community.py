@@ -1692,6 +1692,25 @@ def get_pending_members(timeline_id):
         if not has_access:
             return jsonify({"error": "Access denied. You need moderator privileges to view pending requests."}), 403
         
+        # Auto-expire old pending requests (older than 30 days)
+        from datetime import datetime, timedelta
+        expiry_date = datetime.now() - timedelta(days=30)
+        
+        expired_requests = TimelineMember.query.filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == False,
+            TimelineMember.role == 'pending',
+            TimelineMember.joined_at < expiry_date
+        ).all()
+        
+        if expired_requests:
+            expired_count = len(expired_requests)
+            logger.info(f"Auto-expiring {expired_count} pending requests older than 30 days for timeline {timeline_id}")
+            for request in expired_requests:
+                db.session.delete(request)
+            db.session.commit()
+            logger.info(f"Successfully expired {expired_count} old pending requests")
+        
         # Query pending members (is_active_member=False and role='pending')
         pending_query = db.session.query(
             TimelineMember.id,
