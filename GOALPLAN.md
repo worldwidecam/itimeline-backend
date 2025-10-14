@@ -26,11 +26,34 @@
   - Verdict requirement enforced for all actions
   - Real-time list updates after actions
 
-#### Next Steps
+#### Current Work-In-Progress (2025-10-14)
+**PRIORITY: Membership Approval Toggle Implementation**
+
+**Main Task**: Implement `requires_approval` toggle for community timelines
+- ✅ Database column added (`requires_approval BOOLEAN`)
+- ✅ Backend endpoint updated to save/load toggle state
+- ✅ Frontend Admin Panel Settings tab toggle implemented
+- ✅ Toggle saves successfully to database
+
+**Current Sub-Task**: Fix Join Button to Respect Approval Toggle
+- **ROOT CAUSE IDENTIFIED**: Frontend was calling wrong endpoint
+  - ❌ Was calling: `/api/v1/membership/timelines/{id}/join` (no approval logic)
+  - ✅ Now calling: `/api/v1/timelines/{id}/access-requests` (has approval logic)
+- **FIXES APPLIED**:
+  - ✅ Frontend now calls correct endpoint with approval checking
+  - ✅ Removed pre-emptive localStorage write that bypassed backend response
+  - ✅ Backend endpoint properly checks `requires_approval` toggle
+  - ✅ Backend resets role to 'member' or 'pending' on rejoin (lines 3050-3068)
+- **TESTING NEEDED**: Verify both scenarios work correctly:
+  - Toggle OFF: User immediately becomes active member
+  - Toggle ON: User gets pending status, requires admin approval
+
+#### Future Steps
 - [ ] Testing and refinement of Manage Posts workflow
 - [ ] Optional: "Under Review" visual indicator on event cards
 - [ ] Optional: Media file deletion (Cloudinary) when deleting events
 - [ ] Consider audit log table for moderation actions (currently verdict stored in reports table)
+- [ ] Implement "Leave Community" button for self-removal
 
 
 #### APPENDIX: NOTES

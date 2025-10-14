@@ -1135,39 +1135,84 @@ def update_timeline_visibility(timeline_id):
         "privacy_changed_at": datetime.now().isoformat()
     }), 200
 
-@community_bp.route('/timelines/<int:timeline_id>/access-requests', methods=['POST'])
-@jwt_required()
+@community_bp.route('/timelines/<int:timeline_id>/access-requests', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def request_timeline_access(timeline_id):
     """Request access to a timeline - handles both public and private timelines"""
-    from app import db, Timeline, TimelineMember
+    from flask import request, current_app
+    
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    # Get db and models from current_app to avoid context issues
+    db = current_app.extensions['sqlalchemy']
+    from app import Timeline, TimelineMember
+    
     user_id = get_user_id()
     print(f"DEBUG: User {user_id} requesting access to timeline {timeline_id}")
-    timeline = Timeline.query.get_or_404(timeline_id)
+    
+    # Use db.session.get() instead of Timeline.query.get_or_404()
+    timeline = db.session.get(Timeline, timeline_id)
+    if not timeline:
+        return jsonify({"error": "Timeline not found"}), 404
     
     # Check if user is already a member
-    existing = TimelineMember.query.filter_by(
+    existing = db.session.query(TimelineMember).filter_by(
         timeline_id=timeline_id, user_id=user_id
     ).first()
     
     if existing:
         if existing.is_active_member:
             print(f"DEBUG: User {user_id} is already an active member of timeline {timeline_id}")
-            return jsonify({"message": "You are already a member of this timeline", "status": "already_member"}), 200
+            return jsonify({"message": "You are already a member of this timeline", "status": "already_member", "role": existing.role}), 200
         else:
-            print(f"DEBUG: User {user_id} already has a pending request for timeline {timeline_id}")
-            return jsonify({"message": "Your request to join this timeline is pending approval", "status": "pending"}), 200
+            # User is rejoining - check if they need approval again
+            requires_approval = getattr(timeline, 'requires_approval', False)
+            is_private = timeline.visibility == 'private'
+            needs_approval = is_private or requires_approval
+            
+            if needs_approval:
+                # Reset to pending for approval
+                existing.role = 'pending'
+                existing.is_active_member = False
+                existing.joined_at = datetime.now()
+                db.session.commit()
+                print(f"DEBUG: User {user_id} rejoining - set to pending (requires_approval={requires_approval})")
+                return jsonify({"message": "Your request to rejoin this timeline has been submitted for approval", "role": "pending", "status": "pending"}), 200
+            else:
+                # Auto-approve rejoin
+                existing.role = 'member'
+                existing.is_active_member = True
+                existing.joined_at = datetime.now()
+                db.session.commit()
+                print(f"DEBUG: User {user_id} rejoining - auto-approved as member")
+                return jsonify({"message": "You have successfully rejoined this timeline", "role": "member", "status": "joined"}), 200
     
-    # For public timelines, auto-accept the user as a member
-    # For private timelines, create a pending request
-    is_public = timeline.visibility != 'private'
-    role = 'member' if is_public else 'pending'
+    # Determine if approval is required
+    # Check both visibility (private) AND requires_approval toggle
+    requires_approval = getattr(timeline, 'requires_approval', False)
+    is_private = timeline.visibility == 'private'
+    
+    # User needs approval if EITHER timeline is private OR requires_approval is enabled
+    needs_approval = is_private or requires_approval
+    
+    # Set role and active status based on approval requirement
+    if needs_approval:
+        role = 'pending'
+        is_active = False
+        print(f"DEBUG: User {user_id} needs approval (private={is_private}, requires_approval={requires_approval})")
+    else:
+        role = 'member'
+        is_active = True
+        print(f"DEBUG: User {user_id} auto-approved as member")
     
     # Create the membership record
     new_member = TimelineMember(
         timeline_id=timeline_id,
         user_id=user_id,
         role=role,
-        is_active_member=is_public,  # True for public, False for private
+        is_active_member=is_active,
         joined_at=datetime.now()
     )
     
@@ -1175,12 +1220,12 @@ def request_timeline_access(timeline_id):
     
     try:
         db.session.commit()
-        print(f"DEBUG: Created new membership for user {user_id} in timeline {timeline_id}, role={role}, is_active_member={is_public}")
+        print(f"DEBUG: Created new membership for user {user_id} in timeline {timeline_id}, role={role}, is_active_member={is_active}")
         
-        # For private timelines, notify admins (future enhancement)
-        if not is_public:
+        # Return appropriate message based on approval requirement
+        if needs_approval:
             # TODO: Add notification for admins/moderators
-            return jsonify({"message": "Your request to join this timeline has been submitted", "role": role, "status": "pending"}), 201
+            return jsonify({"message": "Your request to join this timeline has been submitted for approval", "role": role, "status": "pending"}), 201
         else:
             return jsonify({"message": "You have successfully joined this timeline", "role": role, "status": "joined"}), 201
     except Exception as e:

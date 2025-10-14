@@ -446,6 +446,7 @@ class Timeline(db.Model):
     timeline_type = db.Column(db.String(50), default='hashtag', nullable=False)  # Added timeline_type field
     visibility = db.Column(db.String(20), default='public', nullable=False)  # public or private
     privacy_changed_at = db.Column(db.DateTime, nullable=True)  # For tracking cooldown period
+    requires_approval = db.Column(db.Boolean, default=False, nullable=False)  # Require admin approval for join requests
     quote_text = db.Column(db.Text, nullable=True)  # Custom quote text for timeline
     quote_author = db.Column(db.String(200), nullable=True)  # Custom quote author for timeline
     members = db.relationship('TimelineMember', backref='timeline', lazy=True)
@@ -1756,7 +1757,8 @@ def get_timeline_v3(timeline_id):
             'timeline_type': timeline.timeline_type or 'hashtag',
             'visibility': timeline.visibility or 'public',
             'privacy_changed_at': privacy_changed_at_str,
-            'member_count': member_count
+            'member_count': member_count,
+            'requires_approval': getattr(timeline, 'requires_approval', False)
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline: {str(e)}')
@@ -1786,19 +1788,24 @@ def update_timeline_v3(timeline_id):
         
         # Check if user has permission to update (must be creator or admin)
         if timeline.timeline_type == 'community':
-            # For community timelines, check membership role
-            member = TimelineMember.query.filter_by(
-                timeline_id=timeline_id,
-                user_id=current_user_id
-            ).first()
+            # For community timelines, check if user is creator OR has admin role
+            is_creator = (timeline.created_by == current_user_id)
+            is_site_owner = (current_user_id == 1)
             
-            if not member:
-                return jsonify({'error': 'You are not a member of this timeline'}), 403
-            
-            # Only admin, creator, or siteowner can update
-            allowed_roles = ['admin', 'creator', 'siteowner']
-            if member.role.lower() not in allowed_roles:
-                return jsonify({'error': 'You do not have permission to update this timeline'}), 403
+            if not is_creator and not is_site_owner:
+                # Check membership role
+                member = TimelineMember.query.filter_by(
+                    timeline_id=timeline_id,
+                    user_id=current_user_id
+                ).first()
+                
+                if not member:
+                    return jsonify({'error': 'You are not a member of this timeline'}), 403
+                
+                # Only admin or moderator can update (besides creator/site owner)
+                allowed_roles = ['admin', 'moderator', 'siteowner']
+                if member.role.lower() not in allowed_roles:
+                    return jsonify({'error': 'You do not have permission to update this timeline. Only admins, moderators, or the creator can modify settings.'}), 403
         else:
             # For hashtag timelines, only creator can update
             if timeline.created_by != current_user_id:
@@ -1813,6 +1820,11 @@ def update_timeline_v3(timeline_id):
         if 'description' in data:
             timeline.description = data.get('description', '')
             logger.info(f"Updated description for timeline {timeline_id}")
+        
+        # Update requires_approval if provided
+        if 'requires_approval' in data:
+            timeline.requires_approval = bool(data.get('requires_approval', False))
+            logger.info(f"Updated requires_approval for timeline {timeline_id} to {timeline.requires_approval}")
         
         # TODO: Add name updating here after implementing per-type uniqueness constraint
         # if 'name' in data:
@@ -1838,7 +1850,8 @@ def update_timeline_v3(timeline_id):
             'created_by': timeline.created_by,
             'created_at': created_at_str,
             'timeline_type': timeline.timeline_type or 'hashtag',
-            'visibility': timeline.visibility or 'public'
+            'visibility': timeline.visibility or 'public',
+            'requires_approval': getattr(timeline, 'requires_approval', False)
         }), 200
         
     except Exception as e:
@@ -2992,14 +3005,18 @@ def get_timeline_members(timeline_id):
         }), 500
 
 
-@app.route('/api/v1/timelines/<int:timeline_id>/access-requests', methods=['POST'])
-@jwt_required()
+@app.route('/api/v1/timelines/<int:timeline_id>/access-requests', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def request_timeline_access(timeline_id):
     """
     Request access to join a community timeline.
     For public timelines, user is immediately added as a member.
     For private timelines, user is added with 'pending' status.
     """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         # Get the current user ID from the JWT token
         current_user_id = get_jwt_identity()
@@ -3033,22 +3050,52 @@ def request_timeline_access(timeline_id):
                 })
             else:
                 # Reactivate the membership
-                existing_membership.is_active_member = True
+                # Determine if approval is required
+                requires_approval = getattr(timeline, 'requires_approval', False)
+                
+                if timeline.visibility == 'public' and not requires_approval:
+                    # Public timeline with auto-accept - reset to member role
+                    existing_membership.role = 'member'
+                    existing_membership.is_active_member = True
+                    existing_membership.is_blocked = False
+                    status_message = 'You have successfully rejoined this community timeline'
+                    status = 'joined'
+                else:
+                    # Requires approval - reset to pending
+                    existing_membership.role = 'pending'
+                    existing_membership.is_active_member = False
+                    existing_membership.is_blocked = False
+                    if timeline.visibility == 'private':
+                        status_message = 'Your request to rejoin this private timeline has been submitted for approval'
+                    else:
+                        status_message = 'Your request to rejoin has been submitted for approval'
+                    status = 'pending'
+                
                 existing_membership.joined_at = datetime.now()
-                print(f"[DEBUG] Reactivating membership for user {current_user_id}")
+                print(f"[DEBUG] Reactivating membership for user {current_user_id} with role: {existing_membership.role}")
         else:
             # Create new membership
-            # Determine role and status based on timeline visibility
-            if timeline.visibility == 'public':
+            # Determine role and status based on timeline visibility and approval requirements
+            requires_approval = getattr(timeline, 'requires_approval', False)
+            print(f"[DEBUG] Timeline {timeline_id} - visibility: {timeline.visibility}, requires_approval: {requires_approval}")
+            
+            if timeline.visibility == 'public' and not requires_approval:
+                # Public timeline with auto-accept
                 role = 'member'
                 is_active = True
                 status_message = 'You have successfully joined this community timeline'
                 status = 'joined'
-            else:  # private timeline
+                print(f"[DEBUG] Auto-accepting user {current_user_id} as member")
+            else:  # private timeline OR requires approval
+                # Requires admin approval
                 role = 'pending'
                 is_active = False  # Pending members are not active until approved
-                status_message = 'Your request to join this private timeline has been submitted for approval'
+                if timeline.visibility == 'private':
+                    status_message = 'Your request to join this private timeline has been submitted for approval'
+                else:
+                    status_message = 'Your request to join has been submitted for approval'
                 status = 'pending'
+                print(f"[DEBUG] Setting user {current_user_id} as pending (requires_approval={requires_approval}, visibility={timeline.visibility})")
             
             # Special handling for site owner (user ID 1)
             if current_user_id == 1:
@@ -3812,6 +3859,110 @@ def update_timeline_quote(timeline_id):
         print(f"Error updating timeline quote: {e}")
         db.session.rollback()
         return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/members/<int:user_id>/approve', methods=['POST'])
+@jwt_required()
+def approve_pending_member(timeline_id, user_id):
+    """Approve a pending membership request"""
+    try:
+        current_user_id = int(get_jwt_identity())
+        user_id = int(user_id)
+        timeline_id = int(timeline_id)
+        
+        # Check timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check permission: must be admin/moderator/creator
+        current_member = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=current_user_id
+        ).first()
+        
+        if not current_member or current_member.role not in ['admin', 'moderator']:
+            if current_user_id != 1 and current_user_id != timeline.created_by:
+                return jsonify({"error": "Access denied. Admin/Moderator role required."}), 403
+        
+        # Find the pending member
+        member = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        if not member:
+            return jsonify({"error": "Membership request not found"}), 404
+        
+        if member.role != 'pending':
+            return jsonify({"error": "Member is not pending approval"}), 400
+        
+        # Approve: change role to 'member' and activate
+        member.role = 'member'
+        member.is_active_member = True
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Member approved successfully",
+            "user_id": user_id,
+            "approved_by": current_user_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error approving member: {str(e)}"}), 500
+
+
+@app.route('/api/v1/timelines/<int:timeline_id>/members/<int:user_id>/deny', methods=['POST'])
+@jwt_required()
+def deny_pending_member(timeline_id, user_id):
+    """Deny a pending membership request"""
+    try:
+        current_user_id = int(get_jwt_identity())
+        user_id = int(user_id)
+        timeline_id = int(timeline_id)
+        
+        # Check timeline exists
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Check permission: must be admin/moderator/creator
+        current_member = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=current_user_id
+        ).first()
+        
+        if not current_member or current_member.role not in ['admin', 'moderator']:
+            if current_user_id != 1 and current_user_id != timeline.created_by:
+                return jsonify({"error": "Access denied. Admin/Moderator role required."}), 403
+        
+        # Find the pending member
+        member = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        if not member:
+            return jsonify({"error": "Membership request not found"}), 404
+        
+        if member.role != 'pending':
+            return jsonify({"error": "Member is not pending approval"}), 400
+        
+        # Deny: delete the membership record
+        db.session.delete(member)
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Membership request denied",
+            "user_id": user_id,
+            "denied_by": current_user_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error denying member: {str(e)}"}), 500
+
 
 @app.route('/api/v1/timelines/<int:timeline_id>/members/<int:user_id>/remove', methods=['DELETE'])
 @jwt_required()

@@ -37,11 +37,92 @@ cors = CORS(
   - PowerShell: `$env:DATABASE_URL = "postgresql://user:pass@host:5432/db"`
   - Bash: `export DATABASE_URL=postgresql://user:pass@host:5432/db`
 
+## Database Management (October 2025)
+
+### Migration System with Alembic
+
+The project uses **Alembic** for production-ready database migrations. This prevents data loss when schema changes are needed.
+
+#### Why Alembic?
+
+**Before Alembic:**
+- Schema change → Delete database → Lose all data → Recreate test data ❌
+
+**With Alembic:**
+- Schema change → Run migration → Keep all data → Continue working ✅
+
+#### Files Created
+
+- `setup_alembic.py` - One-command setup script
+- `MIGRATION_GUIDE.md` - Comprehensive documentation
+- `QUICK_MIGRATION_REFERENCE.md` - Daily workflow cheat sheet
+- `alembic/` - Migration files directory (commit to Git)
+
+#### Quick Workflow
+
+```bash
+# First time setup (run once)
+python setup_alembic.py
+
+# When you change a model in app.py:
+alembic revision --autogenerate -m "Add requires_approval to Timeline"
+alembic upgrade head
+
+# Commit the migration
+git add alembic/versions/*.py
+git commit -m "Add migration: requires_approval field"
+```
+
+#### Database Reset (Development Only)
+
+**When to reset:**
+- Testing new features
+- Schema conflicts during development
+- Starting fresh with clean data
+
+**How to reset:**
+1. Stop backend (Ctrl+C)
+2. Delete database file:
+   - **Windows**: Delete `instance\itimeline.db` in File Explorer
+   - **PowerShell**: `Remove-Item instance\itimeline.db`
+   - **VS Code**: Right-click file → Delete
+3. Restart backend - Database recreates automatically
+
+**⚠️ Production Rule**: NEVER delete database in production. Always use migrations.
+
+#### Database File Location
+
+- **Path**: `itimeline-backend/instance/itimeline.db`
+- **Git Status**: Ignored (in `.gitignore`)
+- **Why ignored**: Contains user data, each environment has its own
+
+#### What IS Tracked in Git
+
+- ✅ Model definitions (`app.py`)
+- ✅ Migration files (`alembic/versions/*.py`)
+- ✅ Migration config (`alembic/env.py`, `alembic.ini`)
+- ❌ Database file (`instance/itimeline.db`)
+
 ### Development Best Practices
 
-1. **Database Migrations**:
-   - Always use SQLAlchemy migrations for schema changes
-   - Never modify the database schema directly in production
+1. **Database Migrations** (October 2025 - Alembic Integration):
+   - ✅ **Use Alembic for ALL schema changes** - Prevents data loss in production
+   - ✅ **Never delete database in production** - Use migrations instead
+   - ✅ **Always commit migration files to Git** - Team needs them for deployment
+   - ⚠️ **Development**: Database resets acceptable for testing
+   - ⚠️ **Production**: ONLY use migrations, NEVER reset database
+   
+   **Quick Start:**
+   ```bash
+   # First time setup
+   python setup_alembic.py
+   
+   # After changing models
+   alembic revision --autogenerate -m "Description of change"
+   alembic upgrade head
+   
+   # See MIGRATION_GUIDE.md for full documentation
+   ```
 
 2. **Environment Variables**:
    - Keep all sensitive configuration in environment variables
