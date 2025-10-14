@@ -105,7 +105,37 @@ git commit -m "Add migration: requires_approval field"
 
 ### Development Best Practices
 
-1. **Database Migrations** (October 2025 - Alembic Integration):
+1. **Endpoint Auditing & Duplicate Detection** (October 2025):
+   - ⚠️ **Always check for duplicate endpoints** before creating new ones
+   - 🔍 **Search both `app.py` AND blueprint files** (`routes/*.py`)
+   - 📝 **Document endpoint locations** in README when adding new routes
+   
+   **Quick Audit Commands:**
+   ```bash
+   # Find all membership-related endpoints
+   grep -r "@.*route.*membership" app.py routes/
+   
+   # Find specific endpoint pattern
+   grep -r "timelines.*status" app.py routes/
+   
+   # List all blueprints and their prefixes
+   grep -r "Blueprint\|register_blueprint" app.py
+   ```
+   
+   **Common Pitfalls:**
+   - Multiple endpoints serving the same purpose with different logic
+   - Legacy endpoints in `app.py` conflicting with blueprint endpoints
+   - Frontend calling wrong endpoint due to similar URLs
+   
+   **Resolution Process:**
+   1. Identify all duplicate endpoints (check both `app.py` and `routes/`)
+   2. Determine which is the "source of truth" (usually blueprint version)
+   3. Fix all duplicates to have consistent behavior
+   4. Update frontend to use correct endpoint
+   5. Document in README which endpoint to use
+   6. Add deprecation warnings to legacy endpoints
+
+2. **Database Migrations** (October 2025 - Alembic Integration):
    - ✅ **Use Alembic for ALL schema changes** - Prevents data loss in production
    - ✅ **Never delete database in production** - Use migrations instead
    - ✅ **Always commit migration files to Git** - Team needs them for deployment
@@ -124,19 +154,21 @@ git commit -m "Add migration: requires_approval field"
    # See MIGRATION_GUIDE.md for full documentation
    ```
 
-2. **Environment Variables**:
+3. **Environment Variables**:
    - Keep all sensitive configuration in environment variables
    - Use `.env` file for local development (add to `.gitignore`)
    - Document all required environment variables in this README
 
-3. **Error Handling**:
+4. **Error Handling**:
    - Ensure all API endpoints have proper error handling
    - Log errors with appropriate context for debugging
    - Return consistent error response formats
 
-4. **API Versioning**:
+5. **API Versioning**:
    - All API routes should be prefixed with `/api/v1/`
    - Document breaking changes when incrementing the API version
+   - Use blueprints (`routes/*.py`) for organized endpoint groups
+   - Avoid adding new endpoints directly to `app.py` (use blueprints instead)
 
 ## Features
 
@@ -381,10 +413,71 @@ To enable API documentation on your Render deployment:
 
 The lists below reflect what is currently active in this codebase and what is the documented standard moving forward.
 
+### ⚠️ CRITICAL: Duplicate Endpoint Warning (October 2025)
+
+**Issue**: Multiple membership status endpoints exist with different behaviors. Always use the correct endpoint to avoid bugs.
+
+#### ✅ CORRECT Membership Status Endpoints (Use These)
+
+**Primary Endpoint (Community Blueprint)**:
+- `GET /api/v1/timelines/{timeline_id}/membership-status` 
+  - **Location**: `routes/community.py` (line 1236)
+  - **Returns**: `{is_member, role, timeline_visibility, was_removed}`
+  - **Behavior**: ✅ Returns `role: 'pending'` for pending users
+  - **Use for**: All membership checks, join button logic, access control
+
+**Secondary Endpoint (App.py - Legacy)**:
+- `GET /api/v1/membership/timelines/{timeline_id}/status`
+  - **Location**: `app.py` (line 3390)
+  - **Returns**: `{is_member, role, joined_at, timeline_id, timeline_name, ...}`
+  - **Behavior**: ✅ NOW FIXED (Oct 14, 2025) - Returns `role: 'pending'` for pending users
+  - **Note**: Previously had a bug where it returned `role: null` for pending users
+  - **Use for**: Detailed timeline info with membership status
+
+#### 🐛 Debugging Membership Issues
+
+If users report that "Join" buttons reappear after refresh despite having pending requests:
+
+1. **Check which endpoint the frontend is calling**:
+   - Open browser DevTools → Network tab
+   - Look for requests to `/membership-status` or `/status`
+   - Verify the response includes `role: 'pending'` for pending users
+
+2. **Verify backend is returning role for pending users**:
+   ```python
+   # CORRECT (both endpoints now do this):
+   if membership:
+       role = membership.role  # Always set role, even if is_active_member=False
+       if membership.is_active_member:
+           is_member = True
+   
+   # WRONG (old bug):
+   if membership and membership.is_active_member:
+       role = membership.role  # Only set role if active - MISSING pending users!
+   ```
+
+3. **Check frontend hook logic** (`useJoinStatus.js`):
+   ```javascript
+   // Must check for pending role:
+   const hasPendingRequest = resp?.role === 'pending';
+   setIsPending(hasPendingRequest);
+   ```
+
+4. **Enable debug logging**:
+   - Backend: Look for `DEBUG: Membership status for user X on timeline Y`
+   - Frontend: Look for `[useJoinStatus] hasPendingRequest: true/false role: ...`
+
 ### Active (confirmed in code)
 - **Passport**
   - `GET /api/v1/user/passport` — Fetch user's membership passport (see `app.py`)
   - `POST /api/v1/user/passport/sync` — Sync passport data (see `app.py`)
+
+- **Community Membership** (✅ Use these for membership checks)
+  - `GET /api/v1/timelines/{timeline_id}/membership-status` — Check membership status (see `routes/community.py`)
+  - `POST /api/v1/timelines/{timeline_id}/access-requests` — Request to join timeline (see `routes/community.py`)
+  - `GET /api/v1/timelines/{timeline_id}/members` — Get timeline members (see `routes/community.py`)
+  - `GET /api/v1/timelines/{timeline_id}/pending-members` — Get pending membership requests (see `routes/community.py`)
+  - `GET /api/v1/timelines/{timeline_id}/blocked-members` — Get blocked members (see `routes/community.py`)
 
 - **Uploads (Legacy path prefix)**
   - `POST /api/upload` — Generic upload (see `routes/upload.py` via `upload_bp`)
@@ -396,8 +489,8 @@ The lists below reflect what is currently active in this codebase and what is th
 
 ### Documented Standard (`/api/v1`)
 - All new endpoints should use `/api/v1/...`.
-- Community and membership features are standardized under `/api/v1/membership/...`.
-- Frontend docs list the canonical membership endpoints for client usage.
+- Community and membership features are standardized under `/api/v1/timelines/...` (community blueprint).
+- Frontend should use community blueprint endpoints for all membership operations.
 
 > Note: Some legacy endpoints still use `/api` (without version). They remain operational during the transition but are not recommended for new integrations.
 

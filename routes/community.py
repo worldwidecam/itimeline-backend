@@ -1289,12 +1289,20 @@ def check_membership_status(timeline_id):
         # Explicitly check is_active_member flag
         is_active = bool(membership and membership.is_active_member)
         
-        return jsonify({
+        # Return role even for pending users (is_active=False but role='pending')
+        role = None
+        if membership:
+            role = membership.role
+        
+        result = {
             "is_member": is_active,
-            "role": membership.role if (membership and is_active) else None,
+            "role": role,  # Always return role if membership exists (including 'pending')
             "timeline_visibility": timeline.visibility,
-            "was_removed": bool(membership and not membership.is_active_member)
-        }), 200
+            "was_removed": bool(membership and not membership.is_active_member and membership.role != 'pending')
+        }
+        
+        print(f"DEBUG: Membership status for user {user_id} on timeline {timeline_id}: {result}")
+        return jsonify(result), 200
         
     except Exception as e:
         # Log the error but still return a safe response
@@ -1649,6 +1657,83 @@ def get_blocked_members(timeline_id):
         
     except Exception as e:
         logger.exception(f"Error getting blocked members: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@community_bp.route('/timelines/<int:timeline_id>/pending-members', methods=['GET', 'OPTIONS'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    supports_credentials=True,
+    allow_headers=['Content-Type', 'Authorization'],
+    methods=['GET', 'OPTIONS']
+)
+@jwt_required(optional=True)
+def get_pending_members(timeline_id):
+    """Get all pending membership requests for a timeline"""
+    from flask import current_app
+    
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    # Get db from current_app to avoid context issues
+    db = current_app.extensions['sqlalchemy']
+    from app import TimelineMember, User
+    
+    try:
+        # Check if user has access to view pending members (admin or moderator)
+        timeline, membership, has_access = check_timeline_access(timeline_id, 'moderator')
+        
+        if not has_access:
+            return jsonify({"error": "Access denied. You need moderator privileges to view pending requests."}), 403
+        
+        # Query pending members (is_active_member=False and role='pending')
+        pending_query = db.session.query(
+            TimelineMember.id,
+            TimelineMember.user_id,
+            TimelineMember.role,
+            TimelineMember.joined_at,
+            TimelineMember.is_active_member,
+            User.username,
+            User.email,
+            User.avatar_url
+        ).join(
+            User, TimelineMember.user_id == User.id
+        ).filter(
+            TimelineMember.timeline_id == timeline_id,
+            TimelineMember.is_active_member == False,
+            TimelineMember.role == 'pending'
+        ).order_by(
+            TimelineMember.joined_at.asc()  # Oldest requests first
+        ).all()
+        
+        # Format response
+        pending_members = []
+        for member in pending_query:
+            pending_members.append({
+                'id': member.id,
+                'user_id': member.user_id,
+                'username': member.username,
+                'email': member.email,
+                'avatar_url': member.avatar_url,
+                'role': member.role,
+                'requested_at': member.joined_at.isoformat() if member.joined_at else None,
+                'is_active': member.is_active_member
+            })
+        
+        logger.info(f"Found {len(pending_members)} pending requests for timeline {timeline_id}")
+        return jsonify({
+            'pending_members': pending_members,
+            'total': len(pending_members)
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"Error getting pending members: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/reported-posts', methods=['GET'])

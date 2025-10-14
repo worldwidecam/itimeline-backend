@@ -3412,10 +3412,13 @@ def check_membership_status_new(timeline_id):
         role = None
         joined_at = None
         
-        if membership and membership.is_active_member:
-            is_member = True
+        if membership:
+            # Always set role if membership exists (including pending)
             role = membership.role
             joined_at = membership.joined_at.isoformat() if membership.joined_at else None
+            # Only set is_member=True if active
+            if membership.is_active_member:
+                is_member = True
         elif is_site_owner(user_id):
             # Site owner always has access
             is_member = True
@@ -3429,7 +3432,7 @@ def check_membership_status_new(timeline_id):
             # Ensure creator has membership record
             ensure_creator_membership(timeline_id, user_id)
         
-        return jsonify({
+        result = {
             'is_member': is_member,
             'role': role,
             'joined_at': joined_at,
@@ -3440,7 +3443,10 @@ def check_membership_status_new(timeline_id):
             'is_creator': timeline.created_by == user_id,
             'is_site_owner': is_site_owner(user_id),
             'is_blocked': bool(getattr(membership, 'is_blocked', False)) if membership else False
-        }), 200
+        }
+        
+        print(f"DEBUG [NEW ENDPOINT]: Membership status for user {user_id} on timeline {timeline_id}: {result}")
+        return jsonify(result), 200
         
     except Exception as e:
         print(f"Error checking membership status: {e}")
