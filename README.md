@@ -105,7 +105,83 @@ git commit -m "Add migration: requires_approval field"
 
 ### Development Best Practices
 
-1. **Endpoint Auditing & Duplicate Detection** (October 2025):
+1. **PostgreSQL vs SQLite Compatibility** (October 2025):
+   - ⚠️ **CRITICAL**: The application uses **PostgreSQL in production** and local development
+   - 🔍 **Always write database-agnostic SQL** or test on PostgreSQL
+   
+   **Common PostgreSQL vs SQLite Differences:**
+   
+   | Feature | SQLite | PostgreSQL | Correct Approach |
+   |---------|--------|------------|------------------|
+   | **Boolean values** | `0`, `1` | `FALSE`, `TRUE` | Use `FALSE`/`TRUE` in raw SQL |
+   | **Table names** | Case-insensitive | Case-sensitive | Quote table names: `"user"`, `"timeline_member"` |
+   | **String comparison** | Case-insensitive | Case-sensitive | Use `ILIKE` for case-insensitive |
+   | **Date/Time** | Text storage | Native types | Use SQLAlchemy types, not raw strings |
+   | **Auto-increment** | `AUTOINCREMENT` | `SERIAL` | Use SQLAlchemy `db.Column(db.Integer, primary_key=True)` |
+   
+   **✅ CORRECT Examples:**
+   ```python
+   # ✅ Boolean comparison (PostgreSQL-compatible)
+   conn.execute(text("""
+       SELECT * FROM timeline_member 
+       WHERE is_active_member = FALSE
+   """))
+   
+   # ✅ Quoted table names (PostgreSQL-compatible)
+   conn.execute(text("""
+       SELECT u.username FROM "user" u
+       JOIN timeline_member tm ON u.id = tm.user_id
+   """))
+   
+   # ✅ Use SQLAlchemy ORM when possible (database-agnostic)
+   members = TimelineMember.query.filter_by(
+       timeline_id=timeline_id,
+       is_active_member=False
+   ).all()
+   ```
+   
+   **❌ WRONG Examples:**
+   ```python
+   # ❌ Using 0/1 for booleans (SQLite-only)
+   WHERE is_active_member = 0  # FAILS on PostgreSQL
+   
+   # ❌ Unquoted reserved table names (may fail on PostgreSQL)
+   FROM user u  # FAILS if "user" is a reserved keyword
+   
+   # ❌ Case-sensitive string comparison without ILIKE
+   WHERE username = 'John'  # Won't match 'john' on PostgreSQL
+   ```
+   
+   **Database Access Patterns:**
+   
+   When writing raw SQL in routes, use the **engine pattern** from `check_timeline_access`:
+   ```python
+   from flask import current_app
+   from sqlalchemy import text
+   
+   # Get engine safely
+   sa_ext = current_app.extensions.get('sqlalchemy')
+   engine = sa_ext.db.engine if sa_ext and hasattr(sa_ext, 'db') else None
+   if engine is None:
+       from app import db as app_db
+       engine = app_db.engine
+   
+   # Use in transaction
+   with engine.begin() as conn:
+       result = conn.execute(
+           text('SELECT * FROM "user" WHERE id = :uid'),
+           {"uid": user_id}
+       ).mappings().all()
+   ```
+   
+   **Testing Checklist:**
+   - ✅ Test all raw SQL queries on PostgreSQL (not just SQLite)
+   - ✅ Use `FALSE`/`TRUE` for boolean comparisons
+   - ✅ Quote table names that might be reserved keywords
+   - ✅ Prefer SQLAlchemy ORM over raw SQL when possible
+   - ✅ Check backend logs for SQL errors during development
+
+2. **Endpoint Auditing & Duplicate Detection** (October 2025):
    - ⚠️ **Always check for duplicate endpoints** before creating new ones
    - 🔍 **Search both `app.py` AND blueprint files** (`routes/*.py`)
    - 📝 **Document endpoint locations** in README when adding new routes
@@ -135,7 +211,7 @@ git commit -m "Add migration: requires_approval field"
    5. Document in README which endpoint to use
    6. Add deprecation warnings to legacy endpoints
 
-2. **Database Migrations** (October 2025 - Alembic Integration):
+3. **Database Migrations** (October 2025 - Alembic Integration):
    - ✅ **Use Alembic for ALL schema changes** - Prevents data loss in production
    - ✅ **Never delete database in production** - Use migrations instead
    - ✅ **Always commit migration files to Git** - Team needs them for deployment
@@ -154,17 +230,17 @@ git commit -m "Add migration: requires_approval field"
    # See MIGRATION_GUIDE.md for full documentation
    ```
 
-3. **Environment Variables**:
+4. **Environment Variables**:
    - Keep all sensitive configuration in environment variables
    - Use `.env` file for local development (add to `.gitignore`)
    - Document all required environment variables in this README
 
-4. **Error Handling**:
+5. **Error Handling**:
    - Ensure all API endpoints have proper error handling
    - Log errors with appropriate context for debugging
    - Return consistent error response formats
 
-5. **API Versioning**:
+6. **API Versioning**:
    - All API routes should be prefixed with `/api/v1/`
    - Document breaking changes when incrementing the API version
    - Use blueprints (`routes/*.py`) for organized endpoint groups

@@ -1221,6 +1221,7 @@ def request_timeline_access(timeline_id):
     try:
         db.session.commit()
         print(f"DEBUG: Created new membership for user {user_id} in timeline {timeline_id}, role={role}, is_active_member={is_active}")
+        logger.info(f"Created membership: user_id={user_id}, timeline_id={timeline_id}, role={role}, is_active_member={is_active}")
         
         # Return appropriate message based on approval requirement
         if needs_approval:
@@ -1232,6 +1233,77 @@ def request_timeline_access(timeline_id):
         db.session.rollback()
         print(f"ERROR: Failed to create membership: {str(e)}")
         return jsonify({"message": "Error processing your request", "status": "error"}), 500
+
+@community_bp.route('/timelines/<int:timeline_id>/leave', methods=['DELETE', 'OPTIONS'])
+@jwt_required()
+def leave_community(timeline_id):
+    """Allow a user to leave a community timeline (self-removal)"""
+    from flask import current_app
+    from sqlalchemy import text
+    
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    # Get db from current_app
+    db = current_app.extensions['sqlalchemy']
+    from app import Timeline, TimelineMember
+    
+    user_id = get_user_id()
+    logger.info(f"User {user_id} attempting to leave timeline {timeline_id}")
+    
+    try:
+        # Get the timeline
+        timeline = db.session.get(Timeline, timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+        
+        # Get the user's membership
+        membership = db.session.query(TimelineMember).filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id
+        ).first()
+        
+        if not membership or not membership.is_active_member:
+            return jsonify({"error": "You are not a member of this timeline"}), 400
+        
+        # RULE 1: SiteOwner (User ID 1) cannot leave any timeline
+        if user_id == 1:
+            logger.warning(f"SiteOwner (User ID 1) attempted to leave timeline {timeline_id}")
+            return jsonify({"error": "Site owners cannot leave timelines"}), 403
+        
+        # RULE 2: Check if user is the last admin
+        if membership.role == 'admin':
+            # Count other admins
+            admin_count = db.session.query(TimelineMember).filter_by(
+                timeline_id=timeline_id,
+                role='admin',
+                is_active_member=True
+            ).count()
+            
+            if admin_count <= 1:
+                logger.warning(f"User {user_id} is the last admin of timeline {timeline_id}, cannot leave")
+                return jsonify({"error": "You are the last admin of this timeline. Please promote another member to admin before leaving."}), 403
+        
+        # Soft delete: Set is_active_member to False (keeps history)
+        membership.is_active_member = False
+        membership.role = 'member'  # Demote to member when leaving
+        db.session.commit()
+        
+        logger.info(f"User {user_id} successfully left timeline {timeline_id}")
+        
+        # TODO: Sync passport (remove timeline from user's joined list)
+        # This would call the passport sync endpoint
+        
+        return jsonify({
+            "message": "You have successfully left this community",
+            "status": "left"
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.exception(f"Error in leave_community: {str(e)}")
+        return jsonify({"error": f"Error leaving community: {str(e)}"}), 500
 
 @community_bp.route('/timelines/<int:timeline_id>/membership-status', methods=['GET'])
 @jwt_required()
@@ -1675,14 +1747,13 @@ def get_blocked_members(timeline_id):
 @jwt_required(optional=True)
 def get_pending_members(timeline_id):
     """Get all pending membership requests for a timeline"""
-    from flask import current_app
+    from flask import request as flask_request
     
     # Handle OPTIONS preflight request
-    if request.method == 'OPTIONS':
+    if flask_request.method == 'OPTIONS':
         return '', 200
     
-    # Get db from current_app to avoid context issues
-    db = current_app.extensions['sqlalchemy']
+    # Import models from app - db will be accessed via TimelineMember.query
     from app import TimelineMember, User
     
     try:
@@ -1692,44 +1763,64 @@ def get_pending_members(timeline_id):
         if not has_access:
             return jsonify({"error": "Access denied. You need moderator privileges to view pending requests."}), 403
         
-        # Auto-expire old pending requests (older than 30 days)
+        # Get engine using the same pattern as check_timeline_access
+        from flask import current_app
+        from sqlalchemy import text
         from datetime import datetime, timedelta
-        expiry_date = datetime.now() - timedelta(days=30)
         
-        expired_requests = TimelineMember.query.filter(
-            TimelineMember.timeline_id == timeline_id,
-            TimelineMember.is_active_member == False,
-            TimelineMember.role == 'pending',
-            TimelineMember.joined_at < expiry_date
-        ).all()
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext and hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+            engine = sa_ext.db.engine
+        elif sa_ext and hasattr(sa_ext, 'engine'):
+            engine = sa_ext.engine
         
-        if expired_requests:
-            expired_count = len(expired_requests)
-            logger.info(f"Auto-expiring {expired_count} pending requests older than 30 days for timeline {timeline_id}")
-            for request in expired_requests:
-                db.session.delete(request)
-            db.session.commit()
-            logger.info(f"Successfully expired {expired_count} old pending requests")
+        if engine is None:
+            from app import db as app_db
+            engine = app_db.engine
         
-        # Query pending members (is_active_member=False and role='pending')
-        pending_query = db.session.query(
-            TimelineMember.id,
-            TimelineMember.user_id,
-            TimelineMember.role,
-            TimelineMember.joined_at,
-            TimelineMember.is_active_member,
-            User.username,
-            User.email,
-            User.avatar_url
-        ).join(
-            User, TimelineMember.user_id == User.id
-        ).filter(
-            TimelineMember.timeline_id == timeline_id,
-            TimelineMember.is_active_member == False,
-            TimelineMember.role == 'pending'
-        ).order_by(
-            TimelineMember.joined_at.asc()  # Oldest requests first
-        ).all()
+        with engine.begin() as conn:
+            # Auto-expire old pending requests (older than 30 days)
+            expiry_date = datetime.now() - timedelta(days=30)
+            
+            expired_result = conn.execute(
+                text("""
+                    DELETE FROM timeline_member 
+                    WHERE timeline_id = :tid 
+                    AND is_active_member = FALSE 
+                    AND role = 'pending' 
+                    AND joined_at < :expiry_date
+                """),
+                {"tid": timeline_id, "expiry_date": expiry_date}
+            )
+            
+            if expired_result.rowcount > 0:
+                logger.info(f"Auto-expired {expired_result.rowcount} old pending requests for timeline {timeline_id}")
+            
+            # Query pending members (is_active_member=False and role='pending')
+            logger.info(f"Querying pending members for timeline {timeline_id}")
+            pending_query = conn.execute(
+                text("""
+                    SELECT 
+                        tm.id,
+                        tm.user_id,
+                        tm.role,
+                        tm.joined_at,
+                        tm.is_active_member,
+                        u.username,
+                        u.email,
+                        u.avatar_url
+                    FROM timeline_member tm
+                    JOIN "user" u ON tm.user_id = u.id
+                    WHERE tm.timeline_id = :tid
+                    AND tm.is_active_member = FALSE
+                    AND tm.role = 'pending'
+                    ORDER BY tm.joined_at ASC
+                """),
+                {"tid": timeline_id}
+            ).mappings().all()
+            
+            logger.info(f"Found {len(pending_query)} pending members in raw query")
         
         # Format response
         pending_members = []
