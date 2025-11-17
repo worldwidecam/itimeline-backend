@@ -1638,7 +1638,8 @@ def get_timelines_v3():
             'name': timeline.name,
             'description': timeline.description,
             'created_at': timeline.created_at.isoformat(),
-            'timeline_type': timeline.timeline_type
+            'timeline_type': timeline.timeline_type,
+            'created_by': timeline.created_by,
         } for timeline in timelines])
         
     except Exception as e:
@@ -1787,7 +1788,7 @@ def update_timeline_v3(timeline_id):
         timeline = Timeline.query.get_or_404(timeline_id)
         
         # Check if user has permission to update (must be creator or admin)
-        if timeline.timeline_type == 'community':
+        if timeline.timeline_type in ('community', 'personal'):
             # For community timelines, check if user is creator OR has admin role
             is_creator = (timeline.created_by == current_user_id)
             is_site_owner = (current_user_id == 1)

@@ -4,6 +4,11 @@ Backend server for the iTimeline application, a modern web application for creat
 
 ## Important Configuration Notes
 
+### Model Source of Truth (Runtime vs. DB Package)
+
+- Runtime models are currently defined in `app.py` (Flask-SQLAlchemy), while the separate `iTimeline-DB` repository provides parallel SQLAlchemy models and migration utilities.
+- Both sets of models must remain aligned for now. A future consolidation pass should make `iTimeline-DB` (or another shared layer) the single source of truth that the backend imports at runtime.
+
 ### CORS Configuration
 
 **DO NOT** mix multiple CORS implementations as it will cause duplicate headers and break the application. The project uses `flask-cors` with the following configuration in `app.py`:

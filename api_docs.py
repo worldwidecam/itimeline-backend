@@ -44,7 +44,7 @@ class TimelineSchema(Schema):
     description = fields.Str(description="Timeline description", allow_none=True)
     created_by = fields.Int(description="User ID of creator")
     created_at = fields.DateTime(description="Creation timestamp")
-    timeline_type = fields.Str(description="Timeline type (hashtag, community)", default="hashtag")
+    timeline_type = fields.Str(description="Timeline type (hashtag, community, personal)", default="hashtag")
     visibility = fields.Str(description="Timeline visibility (public, private)", default="public")
     formatted_name = fields.Method("get_formatted_name", description="Formatted name with prefix (# or i-)")
     member_count = fields.Int(description="Number of members", dump_only=True)
