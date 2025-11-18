@@ -2713,6 +2713,28 @@ def get_user_profile(user_id):
         logger.error(f"Error getting user profile: {str(e)}")
         return jsonify({'error': 'An error occurred while fetching the user profile'}), 500
 
+@app.route('/api/users/lookup', methods=['GET'])
+@jwt_required()
+def lookup_user_by_username():
+    try:
+        username = request.args.get('username', '').strip()
+        if not username:
+            return jsonify({'error': 'Username is required'}), 400
+
+        user = User.query.filter(User.username.ilike(username)).first()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'avatar_url': user.avatar_url,
+            'bio': user.bio,
+        }), 200
+    except Exception as e:
+        logger.error(f"Error looking up user by username: {str(e)}")
+        return jsonify({'error': 'Failed to look up user'}), 500
+
 @app.route('/api/users/<int:user_id>/events', methods=['GET'])
 @jwt_required()
 def get_user_events(user_id):
