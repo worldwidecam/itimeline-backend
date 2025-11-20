@@ -454,6 +454,10 @@ class Timeline(db.Model):
     def is_community(self):
         return self.timeline_type == 'community'
         
+    def is_personal(self):
+        """Return True when this is a personal timeline."""
+        return self.timeline_type == 'personal'
+
     def is_private(self):
         return self.visibility == 'private'
         
@@ -499,6 +503,78 @@ class TimelineMember(db.Model):
         
     def is_site_owner(self):
         return self.role == 'SiteOwner'  # SiteOwner role is reserved for user ID 1
+
+
+class TimelineViewer(db.Model):
+    """Viewer ACL for personal timelines.
+
+    A row indicates that user_id is allowed to VIEW (read-only) the
+    specified personal timeline. Owners and SiteOwner inherently
+    have access and are not represented here.
+    """
+    __tablename__ = 'timeline_viewer'
+
+    id = db.Column(db.Integer, primary_key=True)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    added_at = db.Column(db.DateTime, default=datetime.now)
+
+    __table_args__ = (
+        db.UniqueConstraint('timeline_id', 'user_id', name='uq_timeline_viewer_timeline_user'),
+    )
+
+    timeline = db.relationship('Timeline', backref=db.backref('viewers', lazy=True))
+    viewer = db.relationship('User')
+
+
+def get_current_user_id():
+    """Helper to get current user id from JWT, or None if unauthenticated."""
+    try:
+        return get_jwt_identity()
+    except Exception:
+        return None
+
+
+def check_personal_timeline_access(timeline_id, required_role=None):
+    """Check access to a personal timeline.
+
+    Returns tuple (timeline, role), where role is one of:
+      - 'owner'      – timeline owner or SiteOwner (id == 1)
+      - 'viewer'     – listed in TimelineViewer
+      - 'forbidden'  – exists but current user has no access
+      - 'not_found'  – timeline does not exist or not personal
+
+    required_role is currently reserved for future extensions and
+    is not used to gate specific actions here; endpoints enforce
+    their own rules based on returned role.
+    """
+    user_id = get_current_user_id()
+
+    timeline = Timeline.query.get(timeline_id)
+    if not timeline or not timeline.is_personal():
+        return None, 'not_found'
+
+    # SiteOwner (user id 1) always has owner-level access
+    if user_id is not None:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            user_id_int = user_id
+    else:
+        user_id_int = None
+
+    if user_id_int is None:
+        return timeline, 'forbidden'
+
+    if user_id_int == 1 or user_id_int == timeline.created_by:
+        return timeline, 'owner'
+
+    # Check viewer ACL
+    viewer_row = TimelineViewer.query.filter_by(timeline_id=timeline.id, user_id=user_id_int).first()
+    if viewer_row:
+        return timeline, 'viewer'
+
+    return timeline, 'forbidden'
 
 class TimelineAction(db.Model):
     """Model for storing timeline-specific action cards (Bronze/Silver/Gold)"""
@@ -3779,6 +3855,304 @@ def get_timeline_action_by_type(timeline_id, action_type):
         
     except Exception as e:
         print(f"Error getting timeline action by type: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/personal', methods=['POST'])
+@jwt_required()
+def create_personal_timeline():
+    """Create a new personal timeline for the current user.
+
+    Personal timelines are always created as private and owned by the
+    authenticated user. Name uniqueness for personal timelines is
+    enforced per-user at the database level once the partial indexes
+    are applied; until then, the global Timeline.name constraint still
+    applies.
+    """
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+
+        data = request.get_json() or {}
+        name = (data.get('name') or '').strip()
+        description = (data.get('description') or '').strip() or None
+
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+
+        new_timeline = Timeline(
+            name=name,
+            description=description,
+            created_by=user_id,
+            created_at=datetime.now(),
+            timeline_type='personal',
+            visibility='private'
+        )
+
+        db.session.add(new_timeline)
+        db.session.commit()
+
+        return jsonify({
+            'id': new_timeline.id,
+            'name': new_timeline.name,
+            'description': new_timeline.description,
+            'timeline_type': new_timeline.timeline_type,
+            'visibility': new_timeline.visibility,
+            'created_by': new_timeline.created_by,
+            'created_at': new_timeline.created_at.isoformat() if new_timeline.created_at else None
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        # Handle name uniqueness violations gracefully
+        message = str(e)
+        if 'unique' in message.lower() and 'timeline' in message.lower():
+            return jsonify({"error": "Timeline name already exists"}), 400
+        print(f"Error creating personal timeline: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/v1/timelines/personal/mine', methods=['GET'])
+@jwt_required()
+def list_my_personal_timelines():
+    """List personal timelines owned by the current user."""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+
+        timelines = Timeline.query.filter_by(
+            created_by=user_id,
+            timeline_type='personal'
+        ).order_by(Timeline.created_at.desc()).all()
+
+        results = []
+        for t in timelines:
+            results.append({
+                'id': t.id,
+                'name': t.name,
+                'description': t.description,
+                'timeline_type': t.timeline_type,
+                'visibility': getattr(t, 'visibility', 'private'),
+                'created_by': t.created_by,
+                'created_at': t.created_at.isoformat() if t.created_at else None
+            })
+
+        return jsonify(results), 200
+    except Exception as e:
+        print(f"Error listing personal timelines: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _slugify_name(name):
+    """Local slug helper mirroring frontend PersonalTimelineWrapper.
+
+    This intentionally mirrors the Phase 1 slug rules used on the
+    frontend so that username + slug resolution behaves consistently.
+    """
+    if not name:
+        return ''
+    value = str(name).strip().lower()
+    # Remove unsafe chars
+    import re
+    value = re.sub(r'[^a-z0-9\s-]', '', value)
+    # spaces -> hyphens
+    value = re.sub(r'\s+', '-', value)
+    # collapse multiple hyphens
+    value = re.sub(r'-+', '-', value)
+    # trim hyphens
+    value = value.strip('-')
+    return value
+
+
+@app.route('/api/v1/personal-timelines/resolve', methods=['GET'])
+@jwt_required()
+def resolve_personal_timeline():
+    """Resolve a personal timeline by username + slug with ACL.
+
+    Query params:
+      - username
+      - slug
+    """
+    try:
+        username = (request.args.get('username') or '').strip()
+        slug = (request.args.get('slug') or '').strip().lower()
+
+        if not username or not slug:
+            return jsonify({"error": "username and slug are required"}), 400
+
+        # Case-insensitive user lookup
+        user = User.query.filter(User.username.ilike(username)).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Find candidate personal timelines for this user
+        candidates = Timeline.query.filter_by(
+            created_by=user.id,
+            timeline_type='personal'
+        ).all()
+
+        matching = None
+        for t in candidates:
+            if _slugify_name(t.name) == slug:
+                matching = t
+                break
+
+        if not matching:
+            return jsonify({"error": "Personal timeline not found"}), 404
+
+        timeline, role = check_personal_timeline_access(matching.id)
+        if role == 'not_found':
+            return jsonify({"error": "Personal timeline not found"}), 404
+        if role == 'forbidden':
+            return jsonify({"error": "Access denied to personal timeline"}), 403
+
+        return jsonify({
+            'id': timeline.id,
+            'name': timeline.name,
+            'owner_username': user.username,
+            'timeline_type': timeline.timeline_type,
+            'visibility': getattr(timeline, 'visibility', 'private')
+        }), 200
+    except Exception as e:
+        print(f"Error resolving personal timeline: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/v1/timelines/<int:timeline_id>/viewers', methods=['GET'])
+@jwt_required()
+def list_personal_timeline_viewers(timeline_id):
+    """List viewers for a personal timeline (owner/SiteOwner only)."""
+    try:
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline or not timeline.is_personal():
+            return jsonify({"error": "Personal timeline not found"}), 404
+
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+
+        # Owner or SiteOwner only
+        if int(user_id) != 1 and int(user_id) != int(timeline.created_by):
+            return jsonify({"error": "Only the owner can manage viewers for this personal timeline"}), 403
+
+        viewers = TimelineViewer.query.filter_by(timeline_id=timeline.id).order_by(TimelineViewer.added_at.desc()).all()
+        results = []
+        for v in viewers:
+            viewer_user = v.viewer
+            results.append({
+                'id': viewer_user.id,
+                'username': viewer_user.username,
+                'avatar_url': viewer_user.avatar_url,
+                'added_at': v.added_at.isoformat() if v.added_at else None
+            })
+
+        return jsonify(results), 200
+    except Exception as e:
+        print(f"Error listing personal timeline viewers: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/v1/timelines/<int:timeline_id>/viewers', methods=['POST'])
+@jwt_required()
+def add_personal_timeline_viewer(timeline_id):
+    """Add a viewer to a personal timeline (owner/SiteOwner only)."""
+    try:
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline or not timeline.is_personal():
+            return jsonify({"error": "Personal timeline not found"}), 404
+
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+
+        if int(user_id) != 1 and int(user_id) != int(timeline.created_by):
+            return jsonify({"error": "Only the owner can manage viewers for this personal timeline"}), 403
+
+        data = request.get_json() or {}
+        viewer_id = data.get('user_id')
+        if not viewer_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        if int(viewer_id) == int(timeline.created_by):
+            return jsonify({"error": "Owner is already a viewer"}), 400
+
+        viewer_user = User.query.get(viewer_id)
+        if not viewer_user:
+            return jsonify({"error": "User not found"}), 404
+
+        existing = TimelineViewer.query.filter_by(
+            timeline_id=timeline.id,
+            user_id=viewer_id
+        ).first()
+        if not existing:
+            new_viewer = TimelineViewer(
+                timeline_id=timeline.id,
+                user_id=viewer_id,
+                added_at=datetime.now()
+            )
+            db.session.add(new_viewer)
+            db.session.commit()
+
+        # Return updated list
+        viewers = TimelineViewer.query.filter_by(timeline_id=timeline.id).order_by(TimelineViewer.added_at.desc()).all()
+        results = []
+        for v in viewers:
+            vu = v.viewer
+            results.append({
+                'id': vu.id,
+                'username': vu.username,
+                'avatar_url': vu.avatar_url,
+                'added_at': v.added_at.isoformat() if v.added_at else None
+            })
+
+        return jsonify(results), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error adding personal timeline viewer: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/v1/timelines/<int:timeline_id>/viewers/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def remove_personal_timeline_viewer(timeline_id, user_id):
+    """Remove a viewer from a personal timeline (owner/SiteOwner only)."""
+    try:
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline or not timeline.is_personal():
+            return jsonify({"error": "Personal timeline not found"}), 404
+
+        current_user_id = get_current_user_id()
+        if not current_user_id:
+            return jsonify({"error": "Authentication required"}), 401
+
+        if int(current_user_id) != 1 and int(current_user_id) != int(timeline.created_by):
+            return jsonify({"error": "Only the owner can manage viewers for this personal timeline"}), 403
+
+        viewer_row = TimelineViewer.query.filter_by(
+            timeline_id=timeline.id,
+            user_id=user_id
+        ).first()
+
+        if viewer_row:
+            db.session.delete(viewer_row)
+            db.session.commit()
+
+        # Return updated list
+        viewers = TimelineViewer.query.filter_by(timeline_id=timeline.id).order_by(TimelineViewer.added_at.desc()).all()
+        results = []
+        for v in viewers:
+            vu = v.viewer
+            results.append({
+                'id': vu.id,
+                'username': vu.username,
+                'avatar_url': vu.avatar_url,
+                'added_at': v.added_at.isoformat() if v.added_at else None
+            })
+
+        return jsonify(results), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error removing personal timeline viewer: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 # =============================================================================
