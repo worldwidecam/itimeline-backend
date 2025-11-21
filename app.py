@@ -528,8 +528,16 @@ class TimelineViewer(db.Model):
 
 
 def get_current_user_id():
-    """Helper to get current user id from JWT, or None if unauthenticated."""
+    """Helper to get current user id from JWT, or None if unauthenticated.
+
+    Uses verify_jwt_in_request(optional=True) so that read-only endpoints which
+    are not decorated with @jwt_required() can still see the current user when
+    a valid access token is present, while continuing to treat missing/invalid
+    tokens as an anonymous request.
+    """
     try:
+        # Establish JWT context if a token is present; treat absence as anonymous
+        verify_jwt_in_request(optional=True)
         return get_jwt_identity()
     except Exception:
         return None
@@ -552,6 +560,7 @@ def check_personal_timeline_access(timeline_id, required_role=None):
 
     timeline = Timeline.query.get(timeline_id)
     if not timeline or not timeline.is_personal():
+        app.logger.info(f"[personal_acl] timeline {timeline_id} not found or not personal")
         return None, 'not_found'
 
     # SiteOwner (user id 1) always has owner-level access
@@ -563,17 +572,23 @@ def check_personal_timeline_access(timeline_id, required_role=None):
     else:
         user_id_int = None
 
+    app.logger.info(f"[personal_acl] timeline={timeline_id} created_by={timeline.created_by} current_user={user_id_int}")
+
     if user_id_int is None:
+        app.logger.info(f"[personal_acl] user is anonymous -> forbidden")
         return timeline, 'forbidden'
 
     if user_id_int == 1 or user_id_int == timeline.created_by:
+        app.logger.info(f"[personal_acl] user {user_id_int} is owner/SiteOwner of timeline {timeline_id}")
         return timeline, 'owner'
 
     # Check viewer ACL
     viewer_row = TimelineViewer.query.filter_by(timeline_id=timeline.id, user_id=user_id_int).first()
     if viewer_row:
+        app.logger.info(f"[personal_acl] user {user_id_int} is explicit viewer of timeline {timeline_id}")
         return timeline, 'viewer'
 
+    app.logger.info(f"[personal_acl] user {user_id_int} has no access to timeline {timeline_id} -> forbidden")
     return timeline, 'forbidden'
 
 class TimelineAction(db.Model):
@@ -1790,13 +1805,22 @@ def create_timeline_v3():
 
 @app.route('/api/timeline-v3/<timeline_id>', methods=['GET'])
 @app.route('/api/v1/timeline-v3/<timeline_id>', methods=['GET'])
+@jwt_required(optional=True)
 def get_timeline_v3(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
         timeline_id = int(timeline_id)
     try:
         timeline = Timeline.query.get_or_404(timeline_id)
-        
+
+        # Enforce personal timeline ACL
+        if hasattr(timeline, 'timeline_type') and timeline.timeline_type == 'personal':
+            timeline_acl, role = check_personal_timeline_access(timeline.id)
+            if role == 'not_found':
+                return jsonify({'error': 'Personal timeline not found'}), 404
+            if role == 'forbidden':
+                return jsonify({'error': 'Access denied to personal timeline'}), 403
+
         # Handle potentially null or invalid created_at datetime
         created_at_str = None
         if timeline.created_at:
@@ -2003,6 +2027,7 @@ def add_event_to_timeline(timeline_id, event_id):
 
 @app.route('/api/timeline-v3/<timeline_id>/events', methods=['GET'])
 @app.route('/api/v1/timeline-v3/<timeline_id>/events', methods=['GET'])
+@jwt_required(optional=True)
 def get_timeline_v3_events(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
@@ -2013,7 +2038,15 @@ def get_timeline_v3_events(timeline_id):
         timeline = Timeline.query.get(timeline_id)
         if not timeline:
             return jsonify({'error': 'Timeline not found'}), 404
-            
+
+        # Enforce personal timeline ACL
+        if hasattr(timeline, 'timeline_type') and timeline.timeline_type == 'personal':
+            timeline_acl, role = check_personal_timeline_access(timeline.id)
+            if role == 'not_found':
+                return jsonify({'error': 'Personal timeline not found'}), 404
+            if role == 'forbidden':
+                return jsonify({'error': 'Access denied to personal timeline'}), 403
+
         # Get all events directly in this timeline
         direct_events = Event.query.filter_by(timeline_id=timeline_id).all()
         
