@@ -2798,8 +2798,14 @@ def get_timeline_v3_by_name(timeline_name):
         # Convert the timeline name to uppercase to match our standardized format
         timeline_name_upper = timeline_name.upper()
         
-        # Find the timeline by name (case-insensitive)
-        timeline = Timeline.query.filter(Timeline.name == timeline_name_upper).first_or_404()
+        # Find timelines by name (case-insensitive) and prefer hashtag-type timelines
+        candidates = Timeline.query.filter(Timeline.name == timeline_name_upper).all()
+        if not candidates:
+            return jsonify({'error': 'Timeline not found'}), 404
+
+        # Prefer a hashtag timeline when multiple share the same base name
+        hashtag_candidate = next((t for t in candidates if t.timeline_type == 'hashtag'), None)
+        timeline = hashtag_candidate or candidates[0]
         
         return jsonify({
             'id': timeline.id,
