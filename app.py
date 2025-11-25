@@ -2155,7 +2155,7 @@ def get_timeline_v3_events(timeline_id):
                         tl_hash_rows = db.session.execute(_sql_text(
                             """
                             SELECT id, name, timeline_type FROM timeline
-                            WHERE LOWER(name) = ANY(:names)
+                            WHERE timeline_type = 'hashtag' AND LOWER(name) = ANY(:names)
                             """
                         ), { 'names': [str(n).lower() for n in tag_names] }).mappings().all()
                         for tl in tl_hash_rows:
@@ -2635,9 +2635,36 @@ def create_timeline_v3_event(timeline_id):
                         app.logger.info(f"Skipping reference to current timeline: {tag_timeline.name} (ID: {tag_timeline.id})")
                 else:
                     app.logger.info(f"Using existing tag: {tag.name} (ID: {tag.id})")
-                    # If tag exists, ensure this event is added to the corresponding timeline
+                    # If tag exists, ensure this event is added to the corresponding hashtag timeline
                     if tag.timeline_id:
                         existing_timeline = Timeline.query.get(tag.timeline_id)
+
+                        # If this tag is currently bound to a non-hashtag timeline (e.g. a community),
+                        # remap it to a proper hashtag timeline for this tag name.
+                        if existing_timeline and existing_timeline.timeline_type != 'hashtag':
+                            capitalized_tag_name = tag_name.upper()
+
+                            remap_timeline = Timeline.query.filter(
+                                Timeline.timeline_type == 'hashtag',
+                                db.or_(
+                                    db.func.lower(Timeline.name) == tag_name,
+                                    db.func.lower(Timeline.name) == f"#{tag_name}"
+                                )
+                            ).first()
+
+                            if not remap_timeline:
+                                remap_timeline = Timeline(
+                                    name=capitalized_tag_name,
+                                    description=f"Timeline for #{tag_name}",
+                                    created_by=current_user_id,
+                                    timeline_type='hashtag'
+                                )
+                                db.session.add(remap_timeline)
+                                db.session.flush()
+
+                            tag.timeline_id = remap_timeline.id
+                            existing_timeline = remap_timeline
+
                         current_timeline = Timeline.query.get(timeline_id)
                         
                         # Only add the reference if it's not the same as the current timeline
