@@ -439,7 +439,7 @@ class User(db.Model):
 
 class Timeline(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     created_at = db.Column(db.DateTime, default=datetime.now())
@@ -1745,34 +1745,52 @@ def create_timeline_v3():
         # Get the current user's ID from the JWT token
         current_user_id = get_jwt_identity()
         logger.info(f"Creating timeline for user ID: {current_user_id}")
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-            
-        if not data.get('name'):
+
+        data = request.get_json() or {}
+        raw_name = (data.get('name') or '').strip()
+        description = (data.get('description') or '').strip()
+        timeline_type = (data.get('timeline_type') or 'hashtag').strip() or 'hashtag'
+        visibility = (data.get('visibility') or 'public').strip() or 'public'
+
+        if not raw_name:
             return jsonify({'error': 'Timeline name is required'}), 400
-            
-        # Check if a timeline with this name already exists for the user
-        existing_timeline = Timeline.query.filter_by(
-            name=data['name'],
-            created_by=current_user_id
-        ).first()
-        
+
+        # Normalize name to upper-case for consistent, case-insensitive uniqueness
+        normalized_name = raw_name.upper()
+
+        # Enforce V2 type-aware uniqueness rules
+        from sqlalchemy import func as sa_func
+
+        query = Timeline.query.filter(sa_func.upper(Timeline.name) == normalized_name)
+
+        if timeline_type == 'personal':
+            # Personal timelines are unique per owner by (UPPER(name), type, created_by)
+            query = query.filter(
+                Timeline.timeline_type == 'personal',
+                Timeline.created_by == current_user_id,
+            )
+        else:
+            # Hashtag & community timelines are globally unique per type by (UPPER(name), type)
+            query = query.filter(Timeline.timeline_type == timeline_type)
+
+        existing_timeline = query.first()
         if existing_timeline:
-            return jsonify({'error': 'You already have a timeline with this name'}), 400
-            
+            if timeline_type == 'personal':
+                return jsonify({'error': 'You already have a personal timeline with this name'}), 400
+            else:
+                return jsonify({'error': 'A timeline with this name already exists for this type'}), 400
+
         new_timeline = Timeline(
-            name=data['name'],
-            description=data.get('description', ''),
+            name=normalized_name,
+            description=description,
             created_by=current_user_id,
-            timeline_type=data.get('timeline_type', 'hashtag'),  # Default to 'hashtag' if not provided
-            visibility=data.get('visibility', 'public')  # Default to 'public' if not provided
+            timeline_type=timeline_type,  # Default to 'hashtag' if not provided
+            visibility=visibility  # Default to 'public' if not provided
         )
-        
+
         db.session.add(new_timeline)
         db.session.flush()  # Get the timeline ID before committing
-        
+
         # Add creator as admin regardless of timeline type
         logger.info(f"Adding creator as admin for timeline: {new_timeline.id}")
         admin = TimelineMember(
@@ -1783,11 +1801,11 @@ def create_timeline_v3():
             joined_at=datetime.now()
         )
         db.session.add(admin)
-        
+
         db.session.commit()
-        
+
         logger.info(f"Timeline created successfully: {new_timeline.id}")
-        
+
         return jsonify({
             'id': new_timeline.id,
             'name': new_timeline.name,
@@ -1796,7 +1814,7 @@ def create_timeline_v3():
             'timeline_type': new_timeline.timeline_type,
             'visibility': new_timeline.visibility
         }), 201
-        
+
     except Exception as e:
         error_msg = f"Failed to create timeline: {str(e)}"
         logger.error(error_msg)
@@ -2566,9 +2584,9 @@ def create_timeline_v3_event(timeline_id):
                 tag_name = tag_name.strip().lower()
                 if not tag_name:
                     continue
-                    
+
                 app.logger.info(f"Processing tag: {tag_name}")
-                    
+
                 # Find or create tag (case insensitive)
                 tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
                 if not tag:
@@ -2576,33 +2594,36 @@ def create_timeline_v3_event(timeline_id):
                     # Create new tag
                     tag = Tag(name=tag_name)
                     db.session.add(tag)
-                    
-                    # Create a new timeline for this tag if it doesn't exist
-                    # First check for the capitalized version
+
+                    # Create or reuse a *hashtag* timeline for this tag.
+                    # We intentionally restrict to hashtag-type timelines so that
+                    # community (i-) timelines are never reused as hashtag timelines
+                    # even if the raw name matches.
                     capitalized_tag_name = tag_name.upper()
-                    
-                    # Check for both normal and hashtag-prefixed versions (for backward compatibility)
+
                     tag_timeline = Timeline.query.filter(
+                        Timeline.timeline_type == 'hashtag',
                         db.or_(
                             db.func.lower(Timeline.name) == tag_name,
                             db.func.lower(Timeline.name) == f"#{tag_name}"
                         )
                     ).first()
-                    
+
                     if not tag_timeline:
-                        app.logger.info(f"Creating new timeline for tag: {capitalized_tag_name}")
-                        # Create a new timeline with ALL CAPS name
+                        app.logger.info(f"Creating new hashtag timeline for tag: {capitalized_tag_name}")
+                        # Create a new hashtag timeline with ALL CAPS name
                         tag_timeline = Timeline(
                             name=capitalized_tag_name,
                             description=f"Timeline for #{tag_name}",
-                            created_by=current_user_id  # Use authenticated user's ID
+                            created_by=current_user_id,  # Use authenticated user's ID
+                            timeline_type='hashtag'
                         )
                         db.session.add(tag_timeline)
                         db.session.flush()  # Get the timeline ID
                         tag.timeline_id = tag_timeline.id
                     else:
-                        app.logger.info(f"Using existing timeline for tag: {tag_timeline.name} (ID: {tag_timeline.id})")
-                        # Use existing timeline
+                        app.logger.info(f"Using existing hashtag timeline for tag: {tag_timeline.name} (ID: {tag_timeline.id})")
+                        # Use existing hashtag timeline
                         tag.timeline_id = tag_timeline.id
 
                     # Add this event as a reference in the timeline, but only if it's not the same as the current timeline
