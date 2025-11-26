@@ -2014,20 +2014,82 @@ def add_event_to_timeline(timeline_id, event_id):
             
         # Add the timeline to the event's referenced_in list
         event.referenced_in.append(timeline)
-        
-        # Create a new tag for this timeline if it doesn't exist
-        timeline_tag_name = timeline.name.lower()
-        existing_tag = Tag.query.filter(db.func.lower(Tag.name) == timeline_tag_name).first()
-        
-        if existing_tag:
-            # If tag exists, check if event already has this tag
-            if existing_tag not in event.tags:
-                event.tags.append(existing_tag)
-        else:
-            # Create new tag and add to event
-            new_tag = Tag(name=timeline_tag_name, timeline_id=timeline.id)
-            db.session.add(new_tag)
-            event.tags.append(new_tag)
+
+        # Apply V2 tagging semantics based on timeline type
+        timeline_type = getattr(timeline, 'timeline_type', 'hashtag')
+
+        if timeline_type == 'hashtag':
+            # For hashtag timelines, ensure there is a hashtag tag bound to this hashtag timeline
+            tag_name = timeline.name.lower()
+            existing_tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
+
+            if existing_tag:
+                # Remap non-hashtag-bound tags to the proper hashtag timeline when necessary
+                if existing_tag.timeline_id and existing_tag.timeline_id != timeline.id:
+                    existing_tag.timeline_id = timeline.id
+                if existing_tag not in event.tags:
+                    event.tags.append(existing_tag)
+            else:
+                new_tag = Tag(name=tag_name, timeline_id=timeline.id)
+                db.session.add(new_tag)
+                event.tags.append(new_tag)
+
+        elif timeline_type == 'community':
+            # For community timelines, add the community listing but drive tags through the
+            # corresponding hashtag timeline based on the base name (without i- prefix).
+            base_name = timeline.name or ''
+            lower_name = base_name.lower()
+            if lower_name.startswith('i-'):
+                base_name = base_name[2:]
+            tag_name = base_name.lower()
+
+            if tag_name:
+                existing_tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
+
+                if existing_tag:
+                    # If this tag is bound to a non-hashtag timeline, remap it to a hashtag timeline
+                    tag_timeline = Timeline.query.get(existing_tag.timeline_id) if existing_tag.timeline_id else None
+                    if not tag_timeline or tag_timeline.timeline_type != 'hashtag':
+                        capitalized_name = tag_name.upper()
+                        hashtag_tl = Timeline.query.filter(
+                            Timeline.timeline_type == 'hashtag',
+                            db.func.lower(Timeline.name) == tag_name
+                        ).first()
+                        if not hashtag_tl:
+                            hashtag_tl = Timeline(
+                                name=capitalized_name,
+                                description=f"Timeline for #{tag_name}",
+                                created_by=current_user_id,
+                                timeline_type='hashtag'
+                            )
+                            db.session.add(hashtag_tl)
+                            db.session.flush()
+                        existing_tag.timeline_id = hashtag_tl.id
+                    if existing_tag not in event.tags:
+                        event.tags.append(existing_tag)
+                else:
+                    # Create a new hashtag timeline + tag for this base name
+                    capitalized_name = tag_name.upper()
+                    hashtag_tl = Timeline.query.filter(
+                        Timeline.timeline_type == 'hashtag',
+                        db.func.lower(Timeline.name) == tag_name
+                    ).first()
+                    if not hashtag_tl:
+                        hashtag_tl = Timeline(
+                            name=capitalized_name,
+                            description=f"Timeline for #{tag_name}",
+                            created_by=current_user_id,
+                            timeline_type='hashtag'
+                        )
+                        db.session.add(hashtag_tl)
+                        db.session.flush()
+                    new_tag = Tag(name=tag_name, timeline_id=hashtag_tl.id)
+                    db.session.add(new_tag)
+                    event.tags.append(new_tag)
+
+        elif timeline_type == 'personal':
+            # For personal timelines, do not create or modify tags; listing is enough.
+            pass
         
         # Save changes
         db.session.commit()
@@ -2384,6 +2446,35 @@ def create_timeline_v3_event(timeline_id):
         # Validate required fields
         if not all(key in data for key in ['title', 'type']):
             return jsonify({'error': 'Missing required fields (title, type)'}), 400
+
+        # Enforce media invariants: a media event must have a concrete media
+        # location. This mirrors the legacy creator behavior where media
+        # events were only created once an upload had succeeded.
+        event_type = (data.get('type') or '').lower()
+        if event_type == 'media':
+            media_url_in = data.get('media_url') or ''
+            fallback_url_in = data.get('url') or ''
+
+            # Reject media events that have no usable media reference at all.
+            if not media_url_in and not fallback_url_in:
+                return jsonify({
+                    'error': 'Media events require a media_url or url',
+                    'message': 'Refusing to create a media event without any media reference.'
+                }), 400
+
+            # Guard against overlong inline data URLs (e.g. data:image/jpeg;base64,...)
+            # that would overflow the media_url column (varchar(500)) and cause
+            # StringDataRightTruncation at the DB layer. Media uploads should
+            # go through /api/upload-media and store a short HTTP(S) URL or
+            # relative path instead of raw base64.
+            effective_media_url = media_url_in or fallback_url_in
+            if isinstance(effective_media_url, str):
+                if effective_media_url.startswith('data:') or len(effective_media_url) > 500:
+                    app.logger.warning('Rejecting media event with inline or overlong media_url')
+                    return jsonify({
+                        'error': 'Invalid media_url',
+                        'message': 'Media uploads must use a stored URL (e.g. from /api/upload-media), not an inline data: URL or extremely long value.'
+                    }), 400
         
         # Get the raw date string (new approach)
         raw_event_date = data.get('raw_event_date', '')
@@ -2572,8 +2663,11 @@ def create_timeline_v3_event(timeline_id):
             # Set the media_subtype
             new_event.media_subtype = media_subtype
             
-            # Store cloudinary_id if available
-            if 'public_id' in data:
+            # Store cloudinary_id if available – accept either the explicit
+            # cloudinary_id field (newer clients) or public_id (legacy helpers).
+            if 'cloudinary_id' in data and data['cloudinary_id']:
+                new_event.cloudinary_id = data['cloudinary_id']
+            elif 'public_id' in data and data['public_id']:
                 new_event.cloudinary_id = data['public_id']
         
         # Handle tags
