@@ -2035,57 +2035,9 @@ def add_event_to_timeline(timeline_id, event_id):
                 event.tags.append(new_tag)
 
         elif timeline_type == 'community':
-            # For community timelines, add the community listing but drive tags through the
-            # corresponding hashtag timeline based on the base name (without i- prefix).
-            base_name = timeline.name or ''
-            lower_name = base_name.lower()
-            if lower_name.startswith('i-'):
-                base_name = base_name[2:]
-            tag_name = base_name.lower()
-
-            if tag_name:
-                existing_tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
-
-                if existing_tag:
-                    # If this tag is bound to a non-hashtag timeline, remap it to a hashtag timeline
-                    tag_timeline = Timeline.query.get(existing_tag.timeline_id) if existing_tag.timeline_id else None
-                    if not tag_timeline or tag_timeline.timeline_type != 'hashtag':
-                        capitalized_name = tag_name.upper()
-                        hashtag_tl = Timeline.query.filter(
-                            Timeline.timeline_type == 'hashtag',
-                            db.func.lower(Timeline.name) == tag_name
-                        ).first()
-                        if not hashtag_tl:
-                            hashtag_tl = Timeline(
-                                name=capitalized_name,
-                                description=f"Timeline for #{tag_name}",
-                                created_by=current_user_id,
-                                timeline_type='hashtag'
-                            )
-                            db.session.add(hashtag_tl)
-                            db.session.flush()
-                        existing_tag.timeline_id = hashtag_tl.id
-                    if existing_tag not in event.tags:
-                        event.tags.append(existing_tag)
-                else:
-                    # Create a new hashtag timeline + tag for this base name
-                    capitalized_name = tag_name.upper()
-                    hashtag_tl = Timeline.query.filter(
-                        Timeline.timeline_type == 'hashtag',
-                        db.func.lower(Timeline.name) == tag_name
-                    ).first()
-                    if not hashtag_tl:
-                        hashtag_tl = Timeline(
-                            name=capitalized_name,
-                            description=f"Timeline for #{tag_name}",
-                            created_by=current_user_id,
-                            timeline_type='hashtag'
-                        )
-                        db.session.add(hashtag_tl)
-                        db.session.flush()
-                    new_tag = Tag(name=tag_name, timeline_id=hashtag_tl.id)
-                    db.session.add(new_tag)
-                    event.tags.append(new_tag)
+            # For community timelines, only add the community listing.
+            # Do NOT auto-add hashtag tags (V2 rule: communities and hashtags are independent).
+            pass
 
         elif timeline_type == 'personal':
             # For personal timelines, do not create or modify tags; listing is enough.
@@ -2202,9 +2154,12 @@ def get_timeline_v3_events(timeline_id):
             try:
                 from sqlalchemy import text as _sql_text
                 # Fetch associated timeline IDs (owning + associations)
+                # Check both event_timeline_association (new) and event_timeline_refs (old)
                 id_rows = db.session.execute(_sql_text(
                     """
                     SELECT DISTINCT timeline_id AS tid FROM event_timeline_association WHERE event_id = :eid
+                    UNION
+                    SELECT DISTINCT timeline_id AS tid FROM event_timeline_refs WHERE event_id = :eid
                     UNION
                     SELECT timeline_id AS tid FROM event WHERE id = :eid
                     """
@@ -2225,17 +2180,23 @@ def get_timeline_v3_events(timeline_id):
                 # De-duplicate
                 assoc_ids = sorted(set(assoc_ids))
                 if assoc_ids:
-                    # Fetch timeline details in one query
+                    # Fetch timeline details in one query with owner info
                     tl_rows = db.session.execute(_sql_text(
                         """
-                        SELECT id, name, timeline_type FROM timeline WHERE id = ANY(:ids)
+                        SELECT t.id, t.name, t.timeline_type, t.created_by, u.username as owner_username, u.avatar_url as owner_avatar
+                        FROM timeline t
+                        LEFT JOIN "user" u ON t.created_by = u.id
+                        WHERE t.id = ANY(:ids)
                         """
                     ), { 'ids': assoc_ids }).mappings().all()
                     for tl in tl_rows:
                         associated_timelines.append({
                             'id': int(tl['id']),
                             'name': tl['name'],
-                            'type': tl.get('timeline_type') or 'hashtag'
+                            'type': tl.get('timeline_type') or 'hashtag',
+                            'created_by': tl['created_by'],
+                            'owner_username': tl['owner_username'],
+                            'owner_avatar': tl['owner_avatar']
                         })
                 # Fetch removed timeline ids for this event from block list
                 ensure_timeline_block_list_table()
@@ -2352,9 +2313,12 @@ def get_timeline_v3_event(timeline_id, event_id):
         try:
             from sqlalchemy import text as _sql_text
             # Fetch associated timeline IDs (owning + associations)
+            # Check both event_timeline_association (new) and event_timeline_refs (old)
             id_rows = db.session.execute(_sql_text(
                 """
                 SELECT DISTINCT timeline_id AS tid FROM event_timeline_association WHERE event_id = :eid
+                UNION
+                SELECT DISTINCT timeline_id AS tid FROM event_timeline_refs WHERE event_id = :eid
                 UNION
                 SELECT timeline_id AS tid FROM event WHERE id = :eid
                 """
@@ -2375,16 +2339,23 @@ def get_timeline_v3_event(timeline_id, event_id):
             # De-duplicate
             assoc_ids = sorted(set(assoc_ids))
             if assoc_ids:
+                # Fetch timeline details in one query with owner info
                 tl_rows = db.session.execute(_sql_text(
                     """
-                    SELECT id, name, timeline_type FROM timeline WHERE id = ANY(:ids)
+                    SELECT t.id, t.name, t.timeline_type, t.created_by, u.username as owner_username, u.avatar_url as owner_avatar
+                    FROM timeline t
+                    LEFT JOIN "user" u ON t.created_by = u.id
+                    WHERE t.id = ANY(:ids)
                     """
                 ), { 'ids': assoc_ids }).mappings().all()
                 for tl in tl_rows:
                     associated_timelines.append({
                         'id': int(tl['id']),
                         'name': tl['name'],
-                        'type': tl.get('timeline_type') or 'hashtag'
+                        'type': tl.get('timeline_type') or 'hashtag',
+                        'created_by': tl['created_by'],
+                        'owner_username': tl['owner_username'],
+                        'owner_avatar': tl['owner_avatar']
                     })
             # Block list: get removed timeline ids for this event
             ensure_timeline_block_list_table()
