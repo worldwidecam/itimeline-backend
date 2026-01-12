@@ -125,7 +125,7 @@ def sync_user_passport():
                 try:
                     rows = conn.execute(text('''
                         SELECT tm.timeline_id, tm.role, tm.is_active_member, tm.joined_at,
-                               t.name AS timeline_name, t.visibility, t.timeline_type, t.created_by AS owner_id
+                               t.name AS timeline_name, t.visibility, t.timeline_type
                         FROM timeline_member tm
                         JOIN timeline t ON tm.timeline_id = t.id
                         WHERE tm.user_id = :uid AND tm.is_active_member = TRUE
@@ -139,8 +139,7 @@ def sync_user_passport():
                             'joined_at': row['joined_at'].isoformat() if row['joined_at'] else None,
                             'timeline_name': row['timeline_name'],
                             'visibility': row['visibility'],
-                            'timeline_type': row['timeline_type'],
-                            'owner_id': row['owner_id']
+                            'timeline_type': row['timeline_type']
                         })
                 except Exception as e_am:
                     logger.info(f"passport.sync: skipping active memberships ({e_am})")
@@ -163,8 +162,7 @@ def sync_user_passport():
                             'timeline_name': row['timeline_name'],
                             'visibility': row['visibility'],
                             'timeline_type': row['timeline_type'],
-                            'is_creator': True,
-                            'owner_id': int(current_user_id)
+                            'is_creator': True
                         })
                 except Exception as e_cr:
                     logger.info(f"passport.sync: skipping created timelines ({e_cr})")

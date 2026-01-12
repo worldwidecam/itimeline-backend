@@ -466,6 +466,21 @@ class Timeline(db.Model):
         if self.is_community():
             return f"i-{self.name}"
         return f"#{self.name}"
+    
+    def to_dict(self):
+        """Convert timeline to dictionary for API responses"""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'timeline_type': self.timeline_type,
+            'visibility': self.visibility,
+            'requires_approval': self.requires_approval,
+            'quote_text': self.quote_text,
+            'quote_author': self.quote_author
+        }
 
 class TimelineMember(db.Model):
     __tablename__ = 'timeline_member'
@@ -2180,7 +2195,7 @@ def get_timeline_v3_events(timeline_id):
                 # De-duplicate
                 assoc_ids = sorted(set(assoc_ids))
                 if assoc_ids:
-                    # Fetch timeline details in one query with owner info
+                    # Fetch timeline details in one query, including owner info for personal timelines
                     tl_rows = db.session.execute(_sql_text(
                         """
                         SELECT t.id, t.name, t.timeline_type, t.created_by, u.username as owner_username, u.avatar_url as owner_avatar
@@ -2194,9 +2209,9 @@ def get_timeline_v3_events(timeline_id):
                             'id': int(tl['id']),
                             'name': tl['name'],
                             'type': tl.get('timeline_type') or 'hashtag',
-                            'created_by': tl['created_by'],
-                            'owner_username': tl['owner_username'],
-                            'owner_avatar': tl['owner_avatar']
+                            'created_by': tl.get('created_by'),
+                            'owner_username': tl.get('owner_username'),
+                            'owner_avatar': tl.get('owner_avatar')
                         })
                 # Fetch removed timeline ids for this event from block list
                 ensure_timeline_block_list_table()
@@ -2339,23 +2354,16 @@ def get_timeline_v3_event(timeline_id, event_id):
             # De-duplicate
             assoc_ids = sorted(set(assoc_ids))
             if assoc_ids:
-                # Fetch timeline details in one query with owner info
                 tl_rows = db.session.execute(_sql_text(
                     """
-                    SELECT t.id, t.name, t.timeline_type, t.created_by, u.username as owner_username, u.avatar_url as owner_avatar
-                    FROM timeline t
-                    LEFT JOIN "user" u ON t.created_by = u.id
-                    WHERE t.id = ANY(:ids)
+                    SELECT id, name, timeline_type FROM timeline WHERE id = ANY(:ids)
                     """
                 ), { 'ids': assoc_ids }).mappings().all()
                 for tl in tl_rows:
                     associated_timelines.append({
                         'id': int(tl['id']),
                         'name': tl['name'],
-                        'type': tl.get('timeline_type') or 'hashtag',
-                        'created_by': tl['created_by'],
-                        'owner_username': tl['owner_username'],
-                        'owner_avatar': tl['owner_avatar']
+                        'type': tl.get('timeline_type') or 'hashtag'
                     })
             # Block list: get removed timeline ids for this event
             ensure_timeline_block_list_table()
