@@ -55,6 +55,64 @@
 - [ ] Consider audit log table for moderation actions (currently verdict stored in reports table)
 - [ ] Implement "Leave Community" button for self-removal
 
+---
+
+## NEW MAJOR GOAL: Community Info Cards (2026-01-12)
+
+### Feature Overview
+Community Info Cards allow moderators and admins to create, edit, and delete informational cards within their community timelines. These cards display important information, resources, or curated lists (e.g., memorial lists, Discord links, community guidelines).
+
+### Design Specifications
+
+#### Access Control
+- **Who can create/edit/delete**: Moderators and Admins (moderator+ role)
+- **Who can view**: All community members and visitors
+- **Admin Panel access**: New "Info Cards" tab (moderator+ access, unlike Settings which is admin-only)
+
+#### Display Location
+- **Primary**: Community members page (right or left side)
+- **Layout**: Members listing reduced to 1/3 width; info cards occupy remaining space
+- **Card styling**: Artistic, modern design matching project guidelines (no image uploads)
+
+#### Card Structure
+- **Title field**: Short, descriptive heading
+- **Description field**: Rich text content (supports hyperlinks, bullet points, formatting)
+- **No media uploads**: Text-only cards for simplicity and consistency
+
+#### Functionality
+- **CRUD operations**: Create, Read, Update, Delete via Admin Panel
+- **Ordering**: Ability to reorder cards (TBD: drag-drop or priority field)
+- **Visibility**: Public by default (all users see cards on members page)
+
+### Implementation Tasks
+
+#### Backend
+- [ ] Design database schema: `CommunityInfoCard` model with fields (id, timeline_id, title, description, order, created_at, updated_at, created_by)
+- [ ] Create migration for info cards table
+- [ ] Implement API endpoints:
+  - [ ] `GET /api/v1/timelines/{timeline_id}/info-cards` - List all cards for a community
+  - [ ] `POST /api/v1/timelines/{timeline_id}/info-cards` - Create new card (moderator+)
+  - [ ] `PUT /api/v1/timelines/{timeline_id}/info-cards/{card_id}` - Update card (moderator+)
+  - [ ] `DELETE /api/v1/timelines/{timeline_id}/info-cards/{card_id}` - Delete card (moderator+)
+  - [ ] `PATCH /api/v1/timelines/{timeline_id}/info-cards/reorder` - Reorder cards (moderator+)
+- [ ] Implement permission checks (moderator+ for write operations)
+
+#### Frontend
+- [ ] Create Info Cards tab in Admin Panel (`AdminPanel.js`)
+- [ ] Implement card management UI (list, create form, edit modal, delete confirmation)
+- [ ] Refactor community members page layout (1/3 width for members, 2/3 for cards)
+- [ ] Create `CommunityInfoCardsDisplay` component for members page
+- [ ] Style cards with artistic modern design (consistent with project guidelines)
+- [ ] Implement card reordering UI (drag-drop or priority controls)
+
+#### Testing
+- [ ] Verify moderator+ can create/edit/delete cards
+- [ ] Verify non-moderators cannot modify cards
+- [ ] Test card display on members page with various content
+- [ ] Test layout responsiveness (1/3 + 2/3 split)
+- [ ] Test card reordering functionality
+- [ ] Test rich text rendering (links, formatting, bullet points)
+
 
 #### APPENDIX: NOTES
 

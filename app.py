@@ -780,6 +780,40 @@ class Comment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now())
     updated_at = db.Column(db.DateTime, default=datetime.now(), onupdate=datetime.now())
 
+class CommunityInfoCard(db.Model):
+    __tablename__ = 'community_info_card'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    card_order = db.Column(db.Integer, default=0)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now())
+    updated_at = db.Column(db.DateTime, default=datetime.now(), onupdate=datetime.now())
+    
+    # Relationships
+    timeline = db.relationship('Timeline', backref=db.backref('info_cards', lazy=True, cascade='all, delete-orphan'))
+    creator = db.relationship('User', backref=db.backref('created_info_cards', lazy=True))
+    
+    # Unique constraint on timeline_id and title
+    __table_args__ = (
+        db.UniqueConstraint('timeline_id', 'title', name='unique_timeline_card_title'),
+    )
+    
+    def to_dict(self):
+        """Convert info card to dictionary for API responses"""
+        return {
+            'id': self.id,
+            'timeline_id': self.timeline_id,
+            'title': self.title,
+            'description': self.description,
+            'card_order': self.card_order,
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
 class TokenBlocklist(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     jti = db.Column(db.String(36), nullable=False, unique=True)
@@ -4015,6 +4049,290 @@ def get_timeline_action_by_type(timeline_id, action_type):
         
     except Exception as e:
         print(f"Error getting timeline action by type: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+# =============================================================================
+# Community Info Cards Endpoints
+# =============================================================================
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards', methods=['GET'])
+@jwt_required(optional=True)
+def get_info_cards(timeline_id):
+    """Get all info cards for a community timeline"""
+    try:
+        # Verify timeline exists and is a community
+        timeline = Timeline.query.filter_by(id=timeline_id, timeline_type='community').first()
+        if not timeline:
+            return jsonify({"error": "Community timeline not found"}), 404
+        
+        # Get all info cards ordered by card_order
+        cards = CommunityInfoCard.query.filter_by(timeline_id=timeline_id).order_by(
+            CommunityInfoCard.card_order.asc(),
+            CommunityInfoCard.created_at.asc()
+        ).all()
+        
+        return jsonify([card.to_dict() for card in cards]), 200
+        
+    except Exception as e:
+        print(f"Error getting info cards: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards', methods=['POST'])
+@jwt_required()
+def create_info_card(timeline_id):
+    """Create a new info card for a community timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Verify timeline exists and is a community
+        timeline = Timeline.query.filter_by(id=timeline_id, timeline_type='community').first()
+        if not timeline:
+            return jsonify({"error": "Community timeline not found"}), 404
+        
+        # Check if user has moderator+ permissions
+        if not is_site_owner(user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_moderator():
+                return jsonify({"error": "Moderator permissions required"}), 403
+        
+        # Parse request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        title = data.get('title', '').strip()
+        description = data.get('description', '').strip()
+        
+        if not title or not description:
+            return jsonify({"error": "Title and description are required"}), 400
+        
+        if len(title) > 255:
+            return jsonify({"error": "Title must be 255 characters or less"}), 400
+        
+        # Check for duplicate title in this timeline
+        existing = CommunityInfoCard.query.filter_by(
+            timeline_id=timeline_id,
+            title=title
+        ).first()
+        
+        if existing:
+            return jsonify({"error": "An info card with this title already exists in this timeline"}), 409
+        
+        # Get max card_order for this timeline
+        max_order = db.session.query(db.func.max(CommunityInfoCard.card_order)).filter_by(
+            timeline_id=timeline_id
+        ).scalar() or 0
+        
+        # Create new card
+        new_card = CommunityInfoCard(
+            timeline_id=timeline_id,
+            title=title,
+            description=description,
+            card_order=max_order + 1,
+            created_by=user_id,
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
+        
+        db.session.add(new_card)
+        db.session.commit()
+        
+        return jsonify(new_card.to_dict()), 201
+        
+    except Exception as e:
+        print(f"Error creating info card: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards/<int:card_id>', methods=['GET'])
+@jwt_required(optional=True)
+def get_info_card(timeline_id, card_id):
+    """Get a specific info card"""
+    try:
+        card = CommunityInfoCard.query.filter_by(
+            id=card_id,
+            timeline_id=timeline_id
+        ).first()
+        
+        if not card:
+            return jsonify({"error": "Info card not found"}), 404
+        
+        return jsonify(card.to_dict()), 200
+        
+    except Exception as e:
+        print(f"Error getting info card: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards/<int:card_id>', methods=['PUT'])
+@jwt_required()
+def update_info_card(timeline_id, card_id):
+    """Update an existing info card"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Check if user has moderator+ permissions
+        if not is_site_owner(user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_moderator():
+                return jsonify({"error": "Moderator permissions required"}), 403
+        
+        # Get the card
+        card = CommunityInfoCard.query.filter_by(
+            id=card_id,
+            timeline_id=timeline_id
+        ).first()
+        
+        if not card:
+            return jsonify({"error": "Info card not found"}), 404
+        
+        # Parse request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # Update fields if provided
+        if 'title' in data:
+            title = data['title'].strip()
+            if not title:
+                return jsonify({"error": "Title cannot be empty"}), 400
+            if len(title) > 255:
+                return jsonify({"error": "Title must be 255 characters or less"}), 400
+            
+            # Check for duplicate title (excluding current card)
+            existing = CommunityInfoCard.query.filter_by(
+                timeline_id=timeline_id,
+                title=title
+            ).filter(CommunityInfoCard.id != card_id).first()
+            
+            if existing:
+                return jsonify({"error": "An info card with this title already exists in this timeline"}), 409
+            
+            card.title = title
+        
+        if 'description' in data:
+            description = data['description'].strip()
+            if not description:
+                return jsonify({"error": "Description cannot be empty"}), 400
+            card.description = description
+        
+        card.updated_at = datetime.now()
+        db.session.commit()
+        
+        return jsonify(card.to_dict()), 200
+        
+    except Exception as e:
+        print(f"Error updating info card: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards/<int:card_id>', methods=['DELETE'])
+@jwt_required()
+def delete_info_card(timeline_id, card_id):
+    """Delete an info card"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Check if user has moderator+ permissions
+        if not is_site_owner(user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_moderator():
+                return jsonify({"error": "Moderator permissions required"}), 403
+        
+        # Get the card
+        card = CommunityInfoCard.query.filter_by(
+            id=card_id,
+            timeline_id=timeline_id
+        ).first()
+        
+        if not card:
+            return jsonify({"error": "Info card not found"}), 404
+        
+        # Delete the card
+        db.session.delete(card)
+        db.session.commit()
+        
+        return jsonify({"message": "Info card deleted successfully"}), 200
+        
+    except Exception as e:
+        print(f"Error deleting info card: {e}")
+        db.session.rollback()
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/timelines/<int:timeline_id>/info-cards/reorder', methods=['PATCH'])
+@jwt_required()
+def reorder_info_cards(timeline_id):
+    """Reorder info cards for a timeline"""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        
+        # Check if user has moderator+ permissions
+        if not is_site_owner(user_id):
+            membership = TimelineMember.query.filter_by(
+                timeline_id=timeline_id,
+                user_id=user_id,
+                is_active_member=True
+            ).first()
+            
+            if not membership or not membership.is_moderator():
+                return jsonify({"error": "Moderator permissions required"}), 403
+        
+        # Parse request data
+        data = request.get_json()
+        if not data or 'cards' not in data:
+            return jsonify({"error": "No reorder data provided"}), 400
+        
+        cards_data = data['cards']
+        if not isinstance(cards_data, list):
+            return jsonify({"error": "Cards must be a list"}), 400
+        
+        # Update card orders
+        for card_data in cards_data:
+            card_id = card_data.get('id')
+            new_order = card_data.get('order')
+            
+            if card_id is None or new_order is None:
+                return jsonify({"error": "Each card must have id and order"}), 400
+            
+            card = CommunityInfoCard.query.filter_by(
+                id=card_id,
+                timeline_id=timeline_id
+            ).first()
+            
+            if not card:
+                return jsonify({"error": f"Card {card_id} not found"}), 404
+            
+            card.card_order = new_order
+        
+        db.session.commit()
+        
+        return jsonify({"message": "Cards reordered successfully"}), 200
+        
+    except Exception as e:
+        print(f"Error reordering info cards: {e}")
+        db.session.rollback()
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/v1/timelines/personal', methods=['POST'])
