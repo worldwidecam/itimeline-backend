@@ -787,6 +787,7 @@ class CommunityInfoCard(db.Model):
     timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=False)
+    content = db.Column(db.Text, nullable=True)
     card_order = db.Column(db.Integer, default=0)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now())
@@ -801,6 +802,29 @@ class CommunityInfoCard(db.Model):
         db.UniqueConstraint('timeline_id', 'title', name='unique_timeline_card_title'),
     )
     
+    def get_content(self):
+        """Get content as parsed JSON, or wrap plain text description for backwards compatibility"""
+        import json
+        if self.content:
+            try:
+                return json.loads(self.content)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Backwards compatibility: wrap plain text description
+        return {
+            'content': [
+                {'type': 'text', 'value': self.description}
+            ]
+        }
+    
+    def set_content(self, content_data):
+        """Set content from parsed JSON structure"""
+        import json
+        if isinstance(content_data, str):
+            self.content = content_data
+        else:
+            self.content = json.dumps(content_data)
+    
     def to_dict(self):
         """Convert info card to dictionary for API responses"""
         return {
@@ -808,6 +832,7 @@ class CommunityInfoCard(db.Model):
             'timeline_id': self.timeline_id,
             'title': self.title,
             'description': self.description,
+            'content': self.get_content(),
             'card_order': self.card_order,
             'created_by': self.created_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -4052,6 +4077,133 @@ def get_timeline_action_by_type(timeline_id, action_type):
         return jsonify({"error": "Internal server error"}), 500
 
 # =============================================================================
+# Community Info Cards Helper Functions
+# =============================================================================
+
+def _parse_description_to_content(description):
+    """Parse plain text description to generate rich content structure with mentions and links
+    
+    Detects:
+    - @username (user mentions) → clickable to user profile
+    - #timeline_name (hashtag mentions) → clickable to hashtag timeline
+    - i-community_name (community mentions) → clickable to community timeline
+    - www.url or https://url (links) → clickable URLs
+    """
+    import json
+    import re
+    
+    if not description or not isinstance(description, str):
+        return None
+    
+    content_items = []
+    last_end = 0
+    
+    # Pattern to match all mention and link types
+    # @username, #timeline_name, i-community_name, www.url, https://url
+    pattern = r'(@[a-zA-Z0-9_]+)|(\#[a-zA-Z0-9_]+)|(i-[a-zA-Z0-9_]+)|(www\.[^\s]+)|(https?://[^\s]+)'
+    
+    for match in re.finditer(pattern, description):
+        # Add text before this match
+        if match.start() > last_end:
+            text_before = description[last_end:match.start()]
+            if text_before.strip():
+                content_items.append({
+                    'type': 'text',
+                    'value': text_before
+                })
+        
+        matched_text = match.group(0)
+        
+        # Determine mention type and extract name/url
+        if matched_text.startswith('@'):
+            # User mention
+            username = matched_text[1:]
+            content_items.append({
+                'type': 'user_mention',
+                'username': username,
+                'text': matched_text
+            })
+        elif matched_text.startswith('#'):
+            # Hashtag mention
+            name = matched_text[1:]
+            content_items.append({
+                'type': 'hashtag_mention',
+                'name': name,
+                'text': matched_text
+            })
+        elif matched_text.startswith('i-'):
+            # Community mention
+            name = matched_text[2:]
+            content_items.append({
+                'type': 'community_mention',
+                'name': name,
+                'text': matched_text
+            })
+        elif matched_text.startswith('http'):
+            # Full URL
+            content_items.append({
+                'type': 'link',
+                'url': matched_text,
+                'text': matched_text
+            })
+        elif matched_text.startswith('www.'):
+            # www URL (convert to https)
+            url = f"https://{matched_text}"
+            content_items.append({
+                'type': 'link',
+                'url': url,
+                'text': matched_text
+            })
+        
+        last_end = match.end()
+    
+    # Add remaining text
+    if last_end < len(description):
+        text_after = description[last_end:]
+        if text_after.strip():
+            content_items.append({
+                'type': 'text',
+                'value': text_after
+            })
+    
+    # Only return content if we found mentions/links
+    if not content_items:
+        return None
+    
+    return json.dumps({'content': content_items})
+
+
+def _extract_plain_text_from_content(content_data):
+    """Extract plain text from rich content structure for backwards compatibility"""
+    import json
+    
+    if isinstance(content_data, str):
+        try:
+            content_data = json.loads(content_data)
+        except (json.JSONDecodeError, TypeError):
+            return content_data
+    
+    if not isinstance(content_data, dict) or 'content' not in content_data:
+        return str(content_data)
+    
+    # Extract all text nodes
+    text_parts = []
+    for item in content_data.get('content', []):
+        if isinstance(item, dict):
+            if item.get('type') == 'text':
+                text_parts.append(item.get('value', ''))
+            elif item.get('type') == 'user_mention':
+                text_parts.append(f"@{item.get('username', 'user')}")
+            elif item.get('type') == 'hashtag_mention':
+                text_parts.append(f"#{item.get('name', 'hashtag')}")
+            elif item.get('type') == 'community_mention':
+                text_parts.append(f"i-{item.get('name', 'community')}")
+            elif item.get('type') == 'link':
+                text_parts.append(item.get('text', item.get('url', '')))
+    
+    return ''.join(text_parts)
+
+# =============================================================================
 # Community Info Cards Endpoints
 # =============================================================================
 
@@ -4080,7 +4232,12 @@ def get_info_cards(timeline_id):
 @app.route('/api/v1/timelines/<int:timeline_id>/info-cards', methods=['POST'])
 @jwt_required()
 def create_info_card(timeline_id):
-    """Create a new info card for a community timeline"""
+    """Create a new info card for a community timeline
+    
+    Supports both plain text and rich content with mentions/embeds:
+    - Plain text: send 'description' field
+    - Rich content: send 'content' field with mention/embed structure
+    """
     try:
         user_id = get_current_user_id()
         if not user_id:
@@ -4108,13 +4265,17 @@ def create_info_card(timeline_id):
             return jsonify({"error": "No data provided"}), 400
         
         title = data.get('title', '').strip()
-        description = data.get('description', '').strip()
         
-        if not title or not description:
-            return jsonify({"error": "Title and description are required"}), 400
+        if not title:
+            return jsonify({"error": "Title is required"}), 400
         
         if len(title) > 255:
             return jsonify({"error": "Title must be 255 characters or less"}), 400
+        
+        # Parse plain text description
+        description = data.get('description', '').strip()
+        if not description:
+            return jsonify({"error": "Description is required"}), 400
         
         # Check for duplicate title in this timeline
         existing = CommunityInfoCard.query.filter_by(
@@ -4140,6 +4301,11 @@ def create_info_card(timeline_id):
             created_at=datetime.now(),
             updated_at=datetime.now()
         )
+        
+        # Auto-parse description to generate rich content with mentions/links
+        parsed_content = _parse_description_to_content(description)
+        if parsed_content:
+            new_card.set_content(parsed_content)
         
         db.session.add(new_card)
         db.session.commit()
@@ -4173,7 +4339,12 @@ def get_info_card(timeline_id, card_id):
 @app.route('/api/v1/timelines/<int:timeline_id>/info-cards/<int:card_id>', methods=['PUT'])
 @jwt_required()
 def update_info_card(timeline_id, card_id):
-    """Update an existing info card"""
+    """Update an existing info card
+    
+    Supports both plain text and rich content with mentions/embeds:
+    - Plain text: send 'description' field
+    - Rich content: send 'content' field with mention/embed structure
+    """
     try:
         user_id = get_current_user_id()
         if not user_id:
@@ -4223,11 +4394,19 @@ def update_info_card(timeline_id, card_id):
             
             card.title = title
         
+        # Update description if provided
         if 'description' in data:
             description = data['description'].strip()
             if not description:
                 return jsonify({"error": "Description cannot be empty"}), 400
             card.description = description
+            # Auto-parse description to generate rich content with mentions/links
+            parsed_content = _parse_description_to_content(description)
+            if parsed_content:
+                card.set_content(parsed_content)
+            else:
+                # Clear rich content if no mentions/links found
+                card.content = None
         
         card.updated_at = datetime.now()
         db.session.commit()
