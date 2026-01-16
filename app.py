@@ -845,6 +845,20 @@ class TokenBlocklist(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
+class Vote(db.Model):
+    __tablename__ = 'vote'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    vote_type = db.Column(db.String(10), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+    
+    __table_args__ = (
+        db.UniqueConstraint('event_id', 'user_id', name='uq_event_user_vote'),
+    )
+
 # JWT Configuration
 @jwt.token_in_blocklist_loader
 def check_if_token_revoked(jwt_header, jwt_payload):
@@ -5076,6 +5090,148 @@ def remove_member_direct(timeline_id, user_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": f"Error removing member: {str(e)}"}), 500
+
+
+@app.route('/api/v1/events/<int:event_id>/vote', methods=['POST'])
+@jwt_required()
+def cast_vote(event_id):
+    """
+    Cast or update a vote on an event.
+    Request body: { "vote_type": "promote" or "demote" }
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        data = request.get_json()
+        
+        if not data or 'vote_type' not in data:
+            return jsonify({'error': 'Missing vote_type field'}), 400
+        
+        vote_type = data['vote_type'].lower()
+        if vote_type not in ['promote', 'demote']:
+            return jsonify({'error': 'vote_type must be "promote" or "demote"'}), 400
+        
+        # Check if event exists
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'error': 'Event not found'}), 404
+        
+        # Check if user already voted
+        existing_vote = Vote.query.filter_by(
+            event_id=event_id,
+            user_id=current_user_id
+        ).first()
+        
+        if existing_vote:
+            # Update existing vote
+            existing_vote.vote_type = vote_type
+            existing_vote.updated_at = datetime.now()
+        else:
+            # Create new vote
+            new_vote = Vote(
+                event_id=event_id,
+                user_id=current_user_id,
+                vote_type=vote_type
+            )
+            db.session.add(new_vote)
+        
+        db.session.commit()
+        
+        # Return updated vote stats
+        promote_count = Vote.query.filter_by(event_id=event_id, vote_type='promote').count()
+        demote_count = Vote.query.filter_by(event_id=event_id, vote_type='demote').count()
+        user_vote = Vote.query.filter_by(event_id=event_id, user_id=current_user_id).first()
+        
+        return jsonify({
+            'event_id': event_id,
+            'promote_count': promote_count,
+            'demote_count': demote_count,
+            'total_count': promote_count + demote_count,
+            'user_vote': user_vote.vote_type if user_vote else None
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error casting vote: {str(e)}')
+        return jsonify({'error': f'Failed to cast vote: {str(e)}'}), 500
+
+
+@app.route('/api/v1/events/<int:event_id>/votes', methods=['GET'])
+@jwt_required(optional=True)
+def get_vote_stats(event_id):
+    """
+    Get vote statistics for an event.
+    Returns promote count, demote count, and current user's vote (if authenticated).
+    """
+    try:
+        # Check if event exists
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'error': 'Event not found'}), 404
+        
+        promote_count = Vote.query.filter_by(event_id=event_id, vote_type='promote').count()
+        demote_count = Vote.query.filter_by(event_id=event_id, vote_type='demote').count()
+        
+        user_vote = None
+        if get_jwt_identity():
+            current_user_id = int(get_jwt_identity())
+            vote = Vote.query.filter_by(event_id=event_id, user_id=current_user_id).first()
+            user_vote = vote.vote_type if vote else None
+        
+        return jsonify({
+            'event_id': event_id,
+            'promote_count': promote_count,
+            'demote_count': demote_count,
+            'total_count': promote_count + demote_count,
+            'user_vote': user_vote
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f'Error getting vote stats: {str(e)}')
+        return jsonify({'error': f'Failed to get vote stats: {str(e)}'}), 500
+
+
+@app.route('/api/v1/events/<int:event_id>/vote', methods=['DELETE'])
+@jwt_required()
+def remove_vote(event_id):
+    """
+    Remove a user's vote from an event.
+    """
+    try:
+        current_user_id = int(get_jwt_identity())
+        
+        # Check if event exists
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'error': 'Event not found'}), 404
+        
+        # Find and delete the vote
+        vote = Vote.query.filter_by(
+            event_id=event_id,
+            user_id=current_user_id
+        ).first()
+        
+        if not vote:
+            return jsonify({'error': 'Vote not found'}), 404
+        
+        db.session.delete(vote)
+        db.session.commit()
+        
+        # Return updated vote stats
+        promote_count = Vote.query.filter_by(event_id=event_id, vote_type='promote').count()
+        demote_count = Vote.query.filter_by(event_id=event_id, vote_type='demote').count()
+        
+        return jsonify({
+            'event_id': event_id,
+            'promote_count': promote_count,
+            'demote_count': demote_count,
+            'total_count': promote_count + demote_count,
+            'user_vote': None
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error removing vote: {str(e)}')
+        return jsonify({'error': f'Failed to remove vote: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
