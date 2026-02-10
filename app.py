@@ -744,6 +744,7 @@ class Event(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text, nullable=True, default='')
+    content = db.Column(db.Text, nullable=True)
     event_date = db.Column(db.DateTime, nullable=False)
     raw_event_date = db.Column(db.String(100), nullable=True, default='')
     type = db.Column(db.String(50), nullable=False, default='remark')
@@ -2308,6 +2309,7 @@ def get_timeline_v3_events(timeline_id):
                 'id': event.id,
                 'title': event.title,
                 'description': event.description,
+                'content': event.content,
                 'event_date': event.event_date.isoformat() if event.event_date else None,
                 'type': event.type,
                 'url': event.url,
@@ -2459,6 +2461,7 @@ def get_timeline_v3_event(timeline_id, event_id):
             'id': event.id,
             'title': event.title,
             'description': event.description,
+            'content': event.content,
             'event_date': event.event_date.isoformat() if event.event_date else None,
             'type': event.type,
             'url': event.url,
@@ -2646,11 +2649,14 @@ def create_timeline_v3_event(timeline_id):
         app.logger.info(f'Final is_exact_user_time: {is_exact_user_time}')
         
         # Create the event with required fields
+        content_payload = _parse_description_to_content(data.get('description', ''))
+
         try:
             # Try to create with raw_event_date
             new_event = Event(
                 title=data['title'],
                 description=data.get('description', ''),
+                content=content_payload,
                 event_date=event_datetime,
                 raw_event_date=raw_event_date,  # Store the raw date string
                 type=data['type'],
@@ -2665,6 +2671,7 @@ def create_timeline_v3_event(timeline_id):
             new_event = Event(
                 title=data['title'],
                 description=data.get('description', ''),
+                content=content_payload,
                 event_date=event_datetime,
                 type=data['type'],
                 timeline_id=timeline_id,
@@ -2853,6 +2860,7 @@ def create_timeline_v3_event(timeline_id):
                 'id': new_event.id,
                 'title': new_event.title,
                 'description': new_event.description,
+                'content': new_event.content,
                 'event_date': new_event.event_date.isoformat(),
                 'event_date_components': {
                     'year': new_event.event_date.year,
