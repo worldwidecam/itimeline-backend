@@ -3157,6 +3157,7 @@ def root():
     })
 
 @app.route('/api/timeline-v3/<timeline_id>/events/<event_id>', methods=['DELETE'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/events/<event_id>', methods=['DELETE'])
 @jwt_required()
 def delete_timeline_v3_event(timeline_id, event_id):
     """
@@ -3177,13 +3178,6 @@ def delete_timeline_v3_event(timeline_id, event_id):
                 'message': 'Timeline not found'
             }), 404
             
-        # Verify the user has permission to modify this timeline
-        if timeline.created_by != current_user_id:
-            return jsonify({
-                'success': False,
-                'message': 'You do not have permission to modify this timeline'
-            }), 403
-            
         # Find the event
         event = Event.query.get(event_id)
         if not event:
@@ -3191,6 +3185,17 @@ def delete_timeline_v3_event(timeline_id, event_id):
                 'success': False,
                 'message': 'Event not found'
             }), 404
+
+        # Verify the user has permission to delete this event
+        # Allowed: event creator or SiteOwner (user ID 1)
+        # TODO: extend to SiteAdmin role when available
+        is_site_owner = str(current_user_id) == '1'
+        is_event_creator = str(event.created_by) == str(current_user_id)
+        if not is_event_creator and not is_site_owner:
+            return jsonify({
+                'success': False,
+                'message': 'You do not have permission to delete this event'
+            }), 403
             
         # Check if the event belongs to the timeline
         if str(event.timeline_id) != str(timeline_id):
