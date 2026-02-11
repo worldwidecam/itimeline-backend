@@ -2897,10 +2897,252 @@ def create_timeline_v3_event(timeline_id):
             db.session.rollback()
             app.logger.error(f'Database error while saving event: {str(db_error)}')
             return jsonify({'error': f'Database error: {str(db_error)}'}), 500
-                
+
     except Exception as e:
         app.logger.error(f'Error creating event: {str(e)}')
         return jsonify({'error': f'Failed to save event: {str(e)}'}), 500
+
+
+@app.route('/api/timeline-v3/<timeline_id>/events/<event_id>', methods=['PATCH'])
+@app.route('/api/v1/timeline-v3/<timeline_id>/events/<event_id>', methods=['PATCH'])
+@jwt_required()
+def update_timeline_v3_event(timeline_id, event_id):
+    """
+    Update an event from a timeline.
+
+    Allowed fields: title, description, event_date/time, tags, url metadata.
+    Media edits and type changes are not allowed here.
+    Permissions: event creator or SiteOwner (user ID 1).
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        data = request.get_json() or {}
+
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({'success': False, 'message': 'Timeline not found'}), 404
+
+        event = Event.query.get(event_id)
+        if not event:
+            return jsonify({'success': False, 'message': 'Event not found'}), 404
+
+        # Permission checks (creator or SiteOwner)
+        is_site_owner = str(current_user_id) == '1'
+        is_event_creator = str(event.created_by) == str(current_user_id)
+        if not is_event_creator and not is_site_owner:
+            return jsonify({
+                'success': False,
+                'message': 'You do not have permission to edit this event'
+            }), 403
+
+        if str(event.timeline_id) != str(timeline_id):
+            return jsonify({
+                'success': False,
+                'message': 'Event does not belong to this timeline'
+            }), 400
+
+        # Disallow type changes
+        if 'type' in data and data.get('type') and str(data.get('type')) != str(event.type):
+            return jsonify({
+                'success': False,
+                'message': 'Event type changes are not allowed'
+            }), 400
+
+        if 'title' in data:
+            event.title = data.get('title') or ''
+
+        if 'description' in data:
+            event.description = data.get('description') or ''
+            event.content = _parse_description_to_content(event.description)
+
+        # Date handling (mirror create behavior, but preserve existing if none provided)
+        raw_event_date = data.get('raw_event_date')
+        event_datetime_str = data.get('event_datetime')
+        event_date_str = data.get('event_date')
+        is_exact_user_time = data.get('is_exact_user_time', event.is_exact_user_time)
+
+        if not isinstance(is_exact_user_time, bool):
+            if isinstance(is_exact_user_time, str):
+                is_exact_user_time = is_exact_user_time.lower() in ('true', 't', 'yes', 'y', '1')
+            elif isinstance(is_exact_user_time, int):
+                is_exact_user_time = is_exact_user_time > 0
+
+        event_datetime = event.event_date or datetime.now()
+
+        if raw_event_date and is_exact_user_time:
+            try:
+                parts = raw_event_date.split('.')
+                if len(parts) >= 6:
+                    month = int(parts[0])
+                    day = int(parts[1])
+                    year = int(parts[2])
+                    hour = int(parts[3])
+                    minute = int(parts[4])
+                    ampm = parts[5].upper()
+
+                    if ampm == 'PM' and hour < 12:
+                        hour += 12
+                    elif ampm == 'AM' and hour == 12:
+                        hour = 0
+
+                    event_datetime = datetime(year, month, day, hour, minute, 0)
+                    is_exact_user_time = True
+            except Exception as e:
+                app.logger.error(f'Error parsing raw date string: {str(e)}')
+
+        if event_datetime_str and is_exact_user_time:
+            try:
+                try:
+                    event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                except ValueError:
+                    event_datetime = datetime.strptime(event_datetime_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+            except Exception as e:
+                app.logger.error(f'Error parsing event_datetime: {str(e)}')
+
+        if event_date_str and is_exact_user_time:
+            try:
+                event_datetime = datetime.fromisoformat(event_date_str.replace('Z', '+00:00'))
+            except Exception as e:
+                app.logger.error(f'Error parsing event_date: {str(e)}')
+
+        if raw_event_date:
+            try:
+                event.raw_event_date = raw_event_date
+            except Exception:
+                app.logger.warning('raw_event_date field not available')
+
+        if event_date_str or event_datetime_str or raw_event_date:
+            event.event_date = event_datetime
+            event.is_exact_user_time = is_exact_user_time
+
+        # URL metadata updates (allow clearing)
+        if 'url' in data:
+            event.url = data.get('url') or ''
+        if 'url_title' in data:
+            event.url_title = data.get('url_title') or ''
+        if 'url_description' in data:
+            event.url_description = data.get('url_description') or ''
+        if 'url_image' in data:
+            event.url_image = data.get('url_image') or ''
+
+        # Tags update (media fields intentionally ignored for edits)
+        if 'tags' in data:
+            event.tags.clear()
+
+            # Remove hashtag timeline references; keep community/personal references
+            for referenced in list(event.referenced_in):
+                if (getattr(referenced, 'timeline_type', 'hashtag') or 'hashtag') == 'hashtag':
+                    event.referenced_in.remove(referenced)
+
+            app.logger.info(f"Processing tags (edit): {data.get('tags')}")
+            for tag_name in data.get('tags') or []:
+                tag_name = tag_name.strip().lower()
+                if not tag_name:
+                    continue
+
+                tag = Tag.query.filter(db.func.lower(Tag.name) == tag_name).first()
+                if not tag:
+                    tag = Tag(name=tag_name)
+                    db.session.add(tag)
+
+                    capitalized_tag_name = tag_name.upper()
+                    tag_timeline = Timeline.query.filter(
+                        Timeline.timeline_type == 'hashtag',
+                        db.or_(
+                            db.func.lower(Timeline.name) == tag_name,
+                            db.func.lower(Timeline.name) == f"#{tag_name}"
+                        )
+                    ).first()
+
+                    if not tag_timeline:
+                        tag_timeline = Timeline(
+                            name=capitalized_tag_name,
+                            description=f"Timeline for #{tag_name}",
+                            created_by=current_user_id,
+                            timeline_type='hashtag'
+                        )
+                        db.session.add(tag_timeline)
+                        db.session.flush()
+                        tag.timeline_id = tag_timeline.id
+                    else:
+                        tag.timeline_id = tag_timeline.id
+                else:
+                    if tag.timeline_id:
+                        existing_timeline = Timeline.query.get(tag.timeline_id)
+                        if existing_timeline and existing_timeline.timeline_type != 'hashtag':
+                            capitalized_tag_name = tag_name.upper()
+                            remap_timeline = Timeline.query.filter(
+                                Timeline.timeline_type == 'hashtag',
+                                db.or_(
+                                    db.func.lower(Timeline.name) == tag_name,
+                                    db.func.lower(Timeline.name) == f"#{tag_name}"
+                                )
+                            ).first()
+
+                            if not remap_timeline:
+                                remap_timeline = Timeline(
+                                    name=capitalized_tag_name,
+                                    description=f"Timeline for #{tag_name}",
+                                    created_by=current_user_id,
+                                    timeline_type='hashtag'
+                                )
+                                db.session.add(remap_timeline)
+                                db.session.flush()
+
+                            tag.timeline_id = remap_timeline.id
+
+                event.tags.append(tag)
+
+                if tag.timeline_id:
+                    tag_timeline = Timeline.query.get(tag.timeline_id)
+                    if tag_timeline and str(tag_timeline.id) != str(timeline_id):
+                        if tag_timeline not in event.referenced_in:
+                            event.referenced_in.append(tag_timeline)
+
+        db.session.commit()
+
+        # Prepare updated response
+        tags = [t.name for t in event.tags]
+        creator = User.query.get(event.created_by)
+        creator_username = creator.username if creator else "Unknown"
+        creator_avatar = creator.avatar_url if creator else None
+
+        updated_event = {
+            'id': event.id,
+            'title': event.title,
+            'description': event.description,
+            'content': event.content,
+            'event_date': event.event_date.isoformat() if event.event_date else None,
+            'type': event.type,
+            'url': event.url,
+            'url_title': event.url_title,
+            'url_description': event.url_description,
+            'url_image': event.url_image,
+            'media_url': event.media_url,
+            'media_type': event.media_type,
+            'media_subtype': getattr(event, 'media_subtype', None),
+            'cloudinary_id': getattr(event, 'cloudinary_id', None),
+            'timeline_id': event.timeline_id,
+            'created_by': event.created_by,
+            'created_by_username': creator_username,
+            'created_by_avatar': creator_avatar,
+            'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
+            'tags': tags,
+            'is_exact_user_time': event.is_exact_user_time
+        }
+
+        try:
+            if hasattr(event, 'raw_event_date') and event.raw_event_date:
+                updated_event['raw_event_date'] = event.raw_event_date
+        except Exception:
+            app.logger.warning('raw_event_date field not available')
+
+        return jsonify(updated_event), 200
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error updating event: {str(e)}')
+        return jsonify({'success': False, 'message': f'Error updating event: {str(e)}'}), 500
 
 @app.route('/api/timeline-v3/<timeline_id>', methods=['DELETE'])
 @app.route('/api/v1/timeline-v3/<timeline_id>', methods=['DELETE'])
