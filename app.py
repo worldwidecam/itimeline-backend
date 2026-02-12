@@ -761,6 +761,7 @@ class Event(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     is_exact_user_time = db.Column(db.Boolean, default=False)
+    edit_locked = db.Column(db.Boolean, default=False)
     tags = db.relationship('Tag', secondary=event_tags, backref=db.backref('events', lazy='dynamic'))
     referenced_in = db.relationship('Timeline', secondary=event_timeline_refs, backref=db.backref('referenced_events', lazy='dynamic'))
     
@@ -2323,6 +2324,7 @@ def get_timeline_v3_events(timeline_id):
                 'created_by_username': creator_username,
                 'created_by_avatar': creator_avatar,
                 'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
+                'edit_locked': bool(getattr(event, 'edit_locked', False)),
                 'tags': tags,
                 'associated_timelines': associated_timelines,
                 # List endpoint has no per-timeline removal context; default to False
@@ -2475,6 +2477,7 @@ def get_timeline_v3_event(timeline_id, event_id):
             'created_by_username': creator_username,
             'created_by_avatar': creator_avatar,
             'created_at': event.created_at.isoformat() if hasattr(event.created_at, 'isoformat') else str(event.created_at),
+            'edit_locked': bool(getattr(event, 'edit_locked', False)),
             'tags': tags,
             'associated_timelines': associated_timelines,
             'removed_from_this_timeline': removed_for_timeline,
@@ -2881,6 +2884,7 @@ def create_timeline_v3_event(timeline_id):
                 'cloudinary_id': new_event.cloudinary_id,
                 'created_by': new_event.created_by,
                 'created_at': new_event.created_at.isoformat(),
+                'edit_locked': bool(getattr(new_event, 'edit_locked', False)),
                 'is_exact_user_time': new_event.is_exact_user_time
             }
             
@@ -2933,6 +2937,12 @@ def update_timeline_v3_event(timeline_id, event_id):
             return jsonify({
                 'success': False,
                 'message': 'You do not have permission to edit this event'
+            }), 403
+
+        if getattr(event, 'edit_locked', False) and not is_site_owner:
+            return jsonify({
+                'success': False,
+                'message': 'This event is locked and cannot be edited'
             }), 403
 
         if str(event.timeline_id) != str(timeline_id):

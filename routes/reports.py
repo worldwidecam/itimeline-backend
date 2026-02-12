@@ -29,6 +29,10 @@ def _ensure_reports_table(engine):
                 assigned_to INTEGER NULL,
                 resolution VARCHAR(16) NULL,
                 verdict TEXT NULL,
+                escalation_type VARCHAR(16) NULL,
+                escalation_summary TEXT NULL,
+                escalated_by INTEGER NULL,
+                escalated_at TIMESTAMP WITHOUT TIME ZONE NULL,
                 created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
                 resolved_at TIMESTAMP WITHOUT TIME ZONE NULL
@@ -96,7 +100,7 @@ def _normalize_status(raw):
     if not raw:
         return 'all'
     s = str(raw).lower()
-    return s if s in {'all', 'pending', 'reviewing', 'resolved'} else 'all'
+    return s if s in {'all', 'pending', 'reviewing', 'resolved', 'escalated'} else 'all'
 
 
 def _get_site_admin_role(conn, user_id):
@@ -140,7 +144,7 @@ def list_reports(timeline_id):
     engine = get_db_engine()
     _ensure_reports_table(engine)
 
-    where_clause = "WHERE timeline_id = :timeline_id"
+    where_clause = "WHERE timeline_id = :timeline_id AND status <> 'escalated'"
     params = { 'timeline_id': timeline_id }
     if status != 'all':
         where_clause += " AND status = :status"
@@ -150,11 +154,19 @@ def list_reports(timeline_id):
     with engine.begin() as conn:
         counts = {}
         for st in ['pending', 'reviewing', 'resolved']:
-            res = conn.execute(text("SELECT COUNT(*) FROM reports WHERE timeline_id = :tid AND status = :st"),
-                               {'tid': timeline_id, 'st': st}).scalar() or 0
+            res = conn.execute(text(
+                """
+                SELECT COUNT(*) FROM reports
+                WHERE timeline_id = :tid AND status = :st AND status <> 'escalated'
+                """
+            ), {'tid': timeline_id, 'st': st}).scalar() or 0
             counts[st] = int(res)
-        total_all = conn.execute(text("SELECT COUNT(*) FROM reports WHERE timeline_id = :tid"),
-                                 {'tid': timeline_id}).scalar() or 0
+        total_all = conn.execute(text(
+            """
+            SELECT COUNT(*) FROM reports
+            WHERE timeline_id = :tid AND status <> 'escalated'
+            """
+        ), {'tid': timeline_id}).scalar() or 0
 
         # Pagination
         offset = (page - 1) * page_size
@@ -170,6 +182,10 @@ def list_reports(timeline_id):
                    r.assigned_to,
                    r.resolution,
                    r.verdict,
+                   r.escalation_type,
+                   r.escalation_summary,
+                   r.escalated_by,
+                   r.escalated_at,
                    r.created_at,
                    r.updated_at,
                    r.resolved_at,
@@ -203,6 +219,10 @@ def list_reports(timeline_id):
             'assigned_to_avatar_url': r.get('assigned_to_avatar_url'),
             'resolution': r['resolution'],
             'verdict': r['verdict'],
+            'escalation_type': r.get('escalation_type'),
+            'escalation_summary': r.get('escalation_summary'),
+            'escalated_by': r.get('escalated_by'),
+            'escalated_at': (r['escalated_at'].isoformat() if r.get('escalated_at') and hasattr(r['escalated_at'], 'isoformat') else (r.get('escalated_at') and str(r['escalated_at']) or None)),
             'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
             'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
             'resolved_at': (r['resolved_at'].isoformat() if r['resolved_at'] and hasattr(r['resolved_at'], 'isoformat') else (r['resolved_at'] and str(r['resolved_at']) or None)),
@@ -230,6 +250,48 @@ def list_reports(timeline_id):
     return jsonify(data), 200
 
 
+@reports_bp.route('/admins/site', methods=['GET'])
+@jwt_required()
+def list_site_admins():
+    """
+    List SiteOwner and SiteAdmin users.
+    """
+    engine = get_db_engine()
+    with engine.begin() as conn:
+        has_access, _role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        reg = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+        if not (reg and reg[0]):
+            return jsonify({'items': []}), 200
+
+        rows = conn.execute(text(
+            """
+            SELECT sa.user_id,
+                   sa.role,
+                   sa.created_at,
+                   u.username,
+                   u.avatar_url
+            FROM site_admin sa
+            LEFT JOIN "user" u ON u.id = sa.user_id
+            ORDER BY CASE WHEN sa.role = 'SiteOwner' THEN 0 ELSE 1 END, sa.created_at ASC
+            """
+        )).mappings().all()
+
+    items = []
+    for r in rows:
+        items.append({
+            'user_id': r['user_id'],
+            'role': r.get('role'),
+            'created_at': (r['created_at'].isoformat() if r.get('created_at') and hasattr(r['created_at'], 'isoformat') else (r.get('created_at') and str(r['created_at']) or None)),
+            'username': r.get('username'),
+            'avatar_url': r.get('avatar_url'),
+        })
+
+    return jsonify({'items': items}), 200
+
+
 @reports_bp.route('/reports', methods=['GET'])
 @jwt_required()
 def list_site_reports():
@@ -247,17 +309,33 @@ def list_site_reports():
         if not has_access:
             return jsonify({'error': 'Access denied'}), 403
 
-        where_clause = ""
+        escalation_filter = "(r.escalated_at IS NOT NULL OR r.escalation_type IS NOT NULL)"
+        escalation_filter_counts = "(escalated_at IS NOT NULL OR escalation_type IS NOT NULL)"
+        where_clause = (
+            "WHERE r.status IN ('escalated', 'reviewing', 'resolved') "
+            f"AND {escalation_filter}"
+        )
         params = {}
         if status != 'all':
-            where_clause = "WHERE r.status = :status"
-            params['status'] = status
+            if status == 'pending':
+                where_clause = f"WHERE r.status = 'escalated' AND {escalation_filter}"
+            else:
+                where_clause = f"WHERE r.status = :status AND {escalation_filter}"
+                params['status'] = status
 
         counts = {}
-        for st in ['pending', 'reviewing', 'resolved']:
-            res = conn.execute(text("SELECT COUNT(*) FROM reports WHERE status = :st"), {'st': st}).scalar() or 0
-            counts[st] = int(res)
-        total_all = conn.execute(text("SELECT COUNT(*) FROM reports")).scalar() or 0
+        counts = {
+            'pending': int(conn.execute(text(
+                f"SELECT COUNT(*) FROM reports WHERE status = 'escalated' AND {escalation_filter_counts}"
+            )).scalar() or 0),
+            'reviewing': int(conn.execute(text(
+                f"SELECT COUNT(*) FROM reports WHERE status = 'reviewing' AND {escalation_filter_counts}"
+            )).scalar() or 0),
+            'resolved': int(conn.execute(text(
+                f"SELECT COUNT(*) FROM reports WHERE status = 'resolved' AND {escalation_filter_counts}"
+            )).scalar() or 0),
+        }
+        total_all = sum(counts.values())
 
         offset = (page - 1) * page_size
         items = conn.execute(text(
@@ -271,6 +349,10 @@ def list_site_reports():
                    r.assigned_to,
                    r.resolution,
                    r.verdict,
+                   r.escalation_type,
+                   r.escalation_summary,
+                   r.escalated_by,
+                   r.escalated_at,
                    r.created_at,
                    r.updated_at,
                    r.resolved_at,
@@ -308,6 +390,10 @@ def list_site_reports():
             'assigned_to_avatar_url': r.get('assigned_to_avatar_url'),
             'resolution': r['resolution'],
             'verdict': r['verdict'],
+            'escalation_type': r.get('escalation_type'),
+            'escalation_summary': r.get('escalation_summary'),
+            'escalated_by': r.get('escalated_by'),
+            'escalated_at': (r['escalated_at'].isoformat() if r.get('escalated_at') and hasattr(r['escalated_at'], 'isoformat') else (r.get('escalated_at') and str(r['escalated_at']) or None)),
             'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
             'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
             'resolved_at': (r['resolved_at'].isoformat() if r['resolved_at'] and hasattr(r['resolved_at'], 'isoformat') else (r['resolved_at'] and str(r['resolved_at']) or None)),
@@ -370,6 +456,56 @@ def accept_site_report(report_id):
     }), 200
 
 
+@reports_bp.route('/timelines/<int:timeline_id>/reports/<int:report_id>/escalate', methods=['POST'])
+@jwt_required()
+def escalate_report(timeline_id, report_id):
+    """
+    Escalate a report to Site Control.
+    Body: { escalation_type: 'edit'|'delete', summary?: string }
+    """
+    timeline_row, membership_row, has_access = check_timeline_access(timeline_id, required_role='moderator')
+    if not has_access:
+        return jsonify({'error': 'Access denied'}), 403
+
+    data = request.get_json(silent=True) or {}
+    escalation_type = str(data.get('escalation_type', '')).lower().strip()
+    if escalation_type not in {'edit', 'delete'}:
+        return jsonify({'error': 'Invalid escalation_type'}), 400
+    summary = (data.get('summary') or '').strip()
+
+    actor_id = get_user_id()
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'escalated',
+                escalation_type = :esc_type,
+                escalation_summary = :summary,
+                escalated_by = :actor,
+                escalated_at = NOW(),
+                assigned_to = NULL,
+                updated_at = NOW()
+            WHERE id = :rid AND timeline_id = :tid
+            RETURNING id, status, escalation_type, escalation_summary, escalated_at
+            """
+        ), {'esc_type': escalation_type, 'summary': summary, 'actor': actor_id, 'rid': report_id, 'tid': timeline_id}).mappings().first()
+        if not res:
+            return jsonify({'error': 'Report not found'}), 404
+
+    return jsonify({
+        'message': 'Report escalated',
+        'report_id': res['id'],
+        'timeline_id': timeline_id,
+        'status': res['status'],
+        'escalation_type': res['escalation_type'],
+        'escalation_summary': res['escalation_summary'],
+        'escalated_at': (res['escalated_at'].isoformat() if hasattr(res['escalated_at'], 'isoformat') else str(res['escalated_at']))
+    }), 200
+
+
 @reports_bp.route('/reports/<int:report_id>/resolve', methods=['POST'])
 @jwt_required()
 def resolve_site_report(report_id):
@@ -381,6 +517,7 @@ def resolve_site_report(report_id):
     if action not in {'remove', 'delete', 'safeguard'}:
         return jsonify({'error': 'Invalid action'}), 400
     verdict = (data.get('verdict') or '').strip()
+    lock_edit = bool(data.get('lock_edit'))
     if not verdict:
         return jsonify({'error': 'verdict is required'}), 400
 
@@ -425,6 +562,18 @@ def resolve_site_report(report_id):
         ), {'action': action, 'verdict': verdict, 'actor': get_user_id(), 'rid': report_id}).mappings().first()
         if not res:
             return jsonify({'error': 'Report not found'}), 404
+
+        if lock_edit and action in {'safeguard', 'remove'}:
+            try:
+                conn.execute(text(
+                    """
+                    UPDATE event
+                    SET edit_locked = TRUE
+                    WHERE id = :eid
+                    """
+                ), {'eid': event_id_for_report})
+            except Exception:
+                pass
 
         if action == 'remove':
             from sqlalchemy import text as _sql_text
