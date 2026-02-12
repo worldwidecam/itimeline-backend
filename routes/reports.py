@@ -99,6 +99,28 @@ def _normalize_status(raw):
     return s if s in {'all', 'pending', 'reviewing', 'resolved'} else 'all'
 
 
+def _get_site_admin_role(conn, user_id):
+    try:
+        reg = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+        if not (reg and reg[0]):
+            return None
+        row = conn.execute(
+            text('SELECT role FROM site_admin WHERE user_id = :uid'),
+            {'uid': user_id}
+        ).mappings().first()
+        return row['role'] if row and row.get('role') else None
+    except Exception as e:
+        logger.info(f"reports: site_admin lookup failed ({e})")
+        return None
+
+
+def _require_site_admin(conn, user_id):
+    role = _get_site_admin_role(conn, user_id)
+    if role in {'SiteOwner', 'SiteAdmin'}:
+        return True, role
+    return False, None
+
+
 @reports_bp.route('/timelines/<int:timeline_id>/reports', methods=['GET'])
 @jwt_required()
 def list_reports(timeline_id):
@@ -206,6 +228,402 @@ def list_reports(timeline_id):
         }
     }
     return jsonify(data), 200
+
+
+@reports_bp.route('/reports', methods=['GET'])
+@jwt_required()
+def list_site_reports():
+    """
+    List reported items across all timelines (SiteOwner/SiteAdmin only).
+    """
+    status = _normalize_status(request.args.get('status'))
+    page, page_size = _parse_paging_args()
+
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+
+    with engine.begin() as conn:
+        has_access, _role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        where_clause = ""
+        params = {}
+        if status != 'all':
+            where_clause = "WHERE r.status = :status"
+            params['status'] = status
+
+        counts = {}
+        for st in ['pending', 'reviewing', 'resolved']:
+            res = conn.execute(text("SELECT COUNT(*) FROM reports WHERE status = :st"), {'st': st}).scalar() or 0
+            counts[st] = int(res)
+        total_all = conn.execute(text("SELECT COUNT(*) FROM reports")).scalar() or 0
+
+        offset = (page - 1) * page_size
+        items = conn.execute(text(
+            f"""
+            SELECT r.id,
+                   r.timeline_id,
+                   r.event_id,
+                   r.reporter_id,
+                   r.reason,
+                   r.status,
+                   r.assigned_to,
+                   r.resolution,
+                   r.verdict,
+                   r.created_at,
+                   r.updated_at,
+                   r.resolved_at,
+                   u.username AS reporter_username,
+                   u.avatar_url AS reporter_avatar_url,
+                   a.username AS assigned_to_username,
+                   a.avatar_url AS assigned_to_avatar_url,
+                   t.name AS timeline_name,
+                   t.timeline_type
+            FROM reports r
+            LEFT JOIN "user" u ON u.id = r.reporter_id
+            LEFT JOIN "user" a ON a.id = r.assigned_to
+            LEFT JOIN timeline t ON t.id = r.timeline_id
+            {where_clause}
+            ORDER BY r.created_at DESC
+            LIMIT :limit OFFSET :offset
+            """
+        ), { **params, 'limit': page_size, 'offset': offset }).mappings().all()
+
+    payload_items = []
+    for r in items:
+        payload_items.append({
+            'id': r['id'],
+            'timeline_id': r['timeline_id'],
+            'timeline_name': r.get('timeline_name'),
+            'timeline_type': r.get('timeline_type'),
+            'event_id': r['event_id'],
+            'reporter_id': r['reporter_id'],
+            'reporter_username': r.get('reporter_username'),
+            'reporter_avatar_url': r.get('reporter_avatar_url'),
+            'reason': r['reason'] or '',
+            'status': r['status'],
+            'assigned_to': r['assigned_to'],
+            'assigned_to_username': r.get('assigned_to_username'),
+            'assigned_to_avatar_url': r.get('assigned_to_avatar_url'),
+            'resolution': r['resolution'],
+            'verdict': r['verdict'],
+            'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
+            'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
+            'resolved_at': (r['resolved_at'].isoformat() if r['resolved_at'] and hasattr(r['resolved_at'], 'isoformat') else (r['resolved_at'] and str(r['resolved_at']) or None)),
+            'event_type': None,
+        })
+
+    data = {
+        'items': payload_items,
+        'status': status,
+        'page': page,
+        'page_size': page_size,
+        'total': total_all if status == 'all' else counts.get(status, 0),
+        'counts': {
+            'all': total_all,
+            'pending': counts.get('pending', 0),
+            'reviewing': counts.get('reviewing', 0),
+            'resolved': counts.get('resolved', 0),
+        },
+        'sort': {
+            'field': 'reported_at',
+            'direction': 'desc'
+        }
+    }
+    return jsonify(data), 200
+
+
+@reports_bp.route('/reports/<int:report_id>/accept', methods=['POST'])
+@jwt_required()
+def accept_site_report(report_id):
+    """
+    Accept a report for review (SiteOwner/SiteAdmin only).
+    """
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+
+    with engine.begin() as conn:
+        has_access, _role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        actor_id = get_user_id()
+        res = conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'reviewing', assigned_to = :actor, updated_at = NOW()
+            WHERE id = :rid
+            RETURNING id, status, assigned_to, updated_at, timeline_id
+            """
+        ), {'actor': actor_id, 'rid': report_id}).mappings().first()
+        if not res:
+            return jsonify({'error': 'Report not found'}), 404
+
+    return jsonify({
+        'message': 'Accepted for review',
+        'report_id': res['id'],
+        'timeline_id': res['timeline_id'],
+        'assigned_to': res['assigned_to'],
+        'new_status': res['status'],
+        'timestamp': (res['updated_at'].isoformat() if hasattr(res['updated_at'], 'isoformat') else str(res['updated_at']))
+    }), 200
+
+
+@reports_bp.route('/reports/<int:report_id>/resolve', methods=['POST'])
+@jwt_required()
+def resolve_site_report(report_id):
+    """
+    Resolve a report across the site (SiteOwner/SiteAdmin only).
+    """
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action', '')).lower()
+    if action not in {'remove', 'delete', 'safeguard'}:
+        return jsonify({'error': 'Invalid action'}), 400
+    verdict = (data.get('verdict') or '').strip()
+    if not verdict:
+        return jsonify({'error': 'verdict is required'}), 400
+
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+
+    full_delete_required = False
+    full_delete_reason = None
+    event_id_for_report = None
+    deleted_event = False
+    deleted_assoc_total = None
+    deleted_tags_total = None
+    deleted_blocklist_total = None
+
+    with engine.begin() as conn:
+        has_access, _role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        rep = conn.execute(text(
+            """
+            SELECT event_id, timeline_id FROM reports WHERE id = :rid
+            """
+        ), {'rid': report_id}).mappings().first()
+        if not rep:
+            return jsonify({'error': 'Report not found'}), 404
+        event_id_for_report = int(rep['event_id'])
+        timeline_id = int(rep['timeline_id']) if rep.get('timeline_id') is not None else None
+
+        res = conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'resolved',
+                resolution = :action,
+                verdict = :verdict,
+                resolved_at = NOW(),
+                updated_at = NOW(),
+                assigned_to = COALESCE(assigned_to, :actor)
+            WHERE id = :rid
+            RETURNING id, status, resolution, verdict, resolved_at, timeline_id
+            """
+        ), {'action': action, 'verdict': verdict, 'actor': get_user_id(), 'rid': report_id}).mappings().first()
+        if not res:
+            return jsonify({'error': 'Report not found'}), 404
+
+        if action == 'remove':
+            from sqlalchemy import text as _sql_text
+            try:
+                conn.execute(_sql_text(
+                    """
+                    CREATE TABLE IF NOT EXISTS timeline_block_list (
+                        event_id INTEGER NOT NULL,
+                        timeline_id INTEGER NOT NULL,
+                        removed_by INTEGER NULL,
+                        removed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (event_id, timeline_id)
+                    )
+                    """
+                ))
+            except Exception:
+                pass
+
+            owner_row = conn.execute(_sql_text("SELECT timeline_id FROM event WHERE id = :eid"), { 'eid': event_id_for_report }).first()
+            owner_id = int(owner_row[0]) if owner_row and owner_row[0] is not None else None
+            active_ids = set()
+            if owner_id:
+                active_ids.add(owner_id)
+
+            assoc_rows = conn.execute(_sql_text(
+                "SELECT DISTINCT timeline_id FROM event_timeline_association WHERE event_id = :eid"
+            ), { 'eid': event_id_for_report }).all()
+            for r in assoc_rows:
+                if r and r[0] is not None:
+                    active_ids.add(int(r[0]))
+
+            def _reg_exists(tbl: str) -> bool:
+                try:
+                    rr = conn.execute(_sql_text("SELECT to_regclass(:t)"), { 't': f'public.{tbl}' }).first()
+                    return bool(rr and rr[0])
+                except Exception:
+                    return False
+
+            tag_count = 0
+            if _reg_exists('event_tags'):
+                cnt = conn.execute(_sql_text("SELECT COUNT(*) FROM event_tags WHERE event_id = :eid"), { 'eid': event_id_for_report }).first()
+                tag_count = int(cnt[0]) if cnt and cnt[0] is not None else 0
+            elif _reg_exists('event_tag'):
+                cnt = conn.execute(_sql_text("SELECT COUNT(*) FROM event_tag WHERE event_id = :eid"), { 'eid': event_id_for_report }).first()
+                tag_count = int(cnt[0]) if cnt and cnt[0] is not None else 0
+
+            tag_names = []
+            if tag_count > 0:
+                candidates = []
+                if _reg_exists('tags') and _reg_exists('event_tags'):
+                    candidates.append("SELECT t.name FROM tags t JOIN event_tags et ON et.tag_id = t.id WHERE et.event_id = :eid")
+                if _reg_exists('tags') and _reg_exists('event_tag'):
+                    candidates.append("SELECT t.name FROM tags t JOIN event_tag et ON et.tag_id = t.id WHERE et.event_id = :eid")
+                if _reg_exists('tag') and _reg_exists('event_tags'):
+                    candidates.append("SELECT t.name FROM tag t JOIN event_tags et ON et.tag_id = t.id WHERE et.event_id = :eid")
+                if _reg_exists('tag') and _reg_exists('event_tag'):
+                    candidates.append("SELECT t.name FROM tag t JOIN event_tag et ON et.tag_id = t.id WHERE et.event_id = :eid")
+                for q in candidates:
+                    rows = conn.execute(_sql_text(q), { 'eid': event_id_for_report }).all()
+                    names = [str(r[0]) for r in rows if r and r[0]]
+                    if names:
+                        tag_names = names
+                        break
+            if tag_names:
+                for nm in list({ n.lower() for n in tag_names if n }):
+                    try:
+                        tlr = conn.execute(_sql_text(
+                            "SELECT id FROM timeline WHERE LOWER(name) = :name"
+                        ), { 'name': nm }).first()
+                        if tlr and tlr[0] is not None:
+                            active_ids.add(int(tlr[0]))
+                    except Exception:
+                        continue
+
+            blocked_rows = conn.execute(_sql_text(
+                "SELECT timeline_id FROM timeline_block_list WHERE event_id = :eid"
+            ), { 'eid': event_id_for_report }).all()
+            blocked_ids = { int(r[0]) for r in blocked_rows if r and r[0] is not None }
+            effective_active_ids = { i for i in active_ids if i not in blocked_ids }
+            other_active_ids = { i for i in effective_active_ids if i != timeline_id }
+
+            exists_elsewhere = (len(other_active_ids) >= 1) or (tag_count >= 2)
+            if not exists_elsewhere:
+                return jsonify({
+                    'error': 'Removal denied: event would have no remaining placements after removal',
+                    'event_id': event_id_for_report,
+                    'timeline_id': timeline_id,
+                    'effective_active_ids': list(sorted(effective_active_ids)),
+                    'other_active_ids': list(sorted(other_active_ids)),
+                    'tag_count': tag_count
+                }), 400
+
+            conn.execute(_sql_text(
+                """
+                INSERT INTO timeline_block_list (event_id, timeline_id, removed_by)
+                VALUES (:eid, :tid, :actor)
+                ON CONFLICT (event_id, timeline_id) DO NOTHING
+                """
+            ), { 'eid': event_id_for_report, 'tid': timeline_id, 'actor': get_jwt_identity() })
+
+            del_res = conn.execute(_sql_text(
+                """
+                DELETE FROM event_timeline_association
+                WHERE event_id = :eid AND timeline_id = :tid
+                """
+            ), { 'eid': event_id_for_report, 'tid': timeline_id })
+            deleted_assoc_count = getattr(del_res, 'rowcount', None)
+
+            blocked_ids_after = blocked_ids | { timeline_id }
+            remaining_after = { i for i in active_ids if i not in blocked_ids_after }
+            if len(remaining_after) == 0:
+                full_delete_required = True
+                full_delete_reason = 'Event is blocked on all timelines'
+
+        elif action == 'delete':
+            from sqlalchemy import text as _sql_text
+            def _reg_exists(tbl: str) -> bool:
+                try:
+                    rr = conn.execute(_sql_text("SELECT to_regclass(:t)"), { 't': f'public.{tbl}' }).first()
+                    return bool(rr and rr[0])
+                except Exception:
+                    return False
+
+            deleted_assoc_total = 0
+            if _reg_exists('event_timeline_association'):
+                try:
+                    res_a = conn.execute(_sql_text(
+                        "DELETE FROM event_timeline_association WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_assoc_total = int(getattr(res_a, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            deleted_tags_total = 0
+            if _reg_exists('event_tags'):
+                try:
+                    res_t = conn.execute(_sql_text(
+                        "DELETE FROM event_tags WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_tags_total += int(getattr(res_t, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+            elif _reg_exists('event_tag'):
+                try:
+                    res_t = conn.execute(_sql_text(
+                        "DELETE FROM event_tag WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_tags_total += int(getattr(res_t, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            deleted_blocklist_total = 0
+            if _reg_exists('timeline_block_list'):
+                try:
+                    res_b = conn.execute(_sql_text(
+                        "DELETE FROM timeline_block_list WHERE event_id = :eid"
+                    ), { 'eid': event_id_for_report })
+                    deleted_blocklist_total = int(getattr(res_b, 'rowcount', 0) or 0)
+                except Exception:
+                    pass
+
+            try:
+                res_e = conn.execute(_sql_text(
+                    "DELETE FROM event WHERE id = :eid"
+                ), { 'eid': event_id_for_report })
+                deleted_event = (getattr(res_e, 'rowcount', 0) or 0) > 0
+            except Exception:
+                deleted_event = False
+
+            full_delete_required = False
+            full_delete_reason = None
+
+        try:
+            from sqlalchemy import text as _sql_text
+            rm_rows_resp = conn.execute(_sql_text(
+                "SELECT timeline_id FROM timeline_block_list WHERE event_id = :eid"
+            ), { 'eid': event_id_for_report }).all()
+            removed_timeline_ids_resp = [int(r[0]) for r in rm_rows_resp]
+        except Exception:
+            removed_timeline_ids_resp = []
+
+    return jsonify({
+        'message': f'Report resolved with action {action}',
+        'report_id': res['id'],
+        'timeline_id': res['timeline_id'],
+        'action': res['resolution'],
+        'verdict': res['verdict'],
+        'new_status': res['status'],
+        'resolved_at': (res['resolved_at'].isoformat() if hasattr(res['resolved_at'], 'isoformat') else str(res['resolved_at'])),
+        'full_delete_required': full_delete_required,
+        'full_delete_reason': full_delete_reason,
+        'event_id': event_id_for_report,
+        'deleted_assoc_count': (deleted_assoc_count if action == 'remove' else deleted_assoc_total if action == 'delete' else None),
+        'deleted_tags_count': (deleted_tags_total if action == 'delete' else None),
+        'deleted_blocklist_count': (deleted_blocklist_total if action == 'delete' else None),
+        'deleted_event': (deleted_event if action == 'delete' else None),
+        'blocked': (True if action == 'remove' else False),
+        'removed_timeline_ids': removed_timeline_ids_resp
+    }), 200
 
 
 @reports_bp.route('/timelines/<int:timeline_id>/reports', methods=['POST'])

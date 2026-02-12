@@ -81,9 +81,27 @@ def get_user_passport():
                     logger.info(f"passport: preferences_json parse error ({pe}); using {{}}")
                     preferences = {}
 
+            site_role = None
+            is_site_admin = False
+            try:
+                reg_site = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+                site_table_exists = bool(reg_site and reg_site[0])
+                if site_table_exists:
+                    site_row = conn.execute(
+                        text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                        {'uid': current_user_id}
+                    ).mappings().first()
+                    if site_row and site_row.get('role'):
+                        site_role = site_row['role']
+                        is_site_admin = True
+            except Exception as se:
+                logger.info(f"passport: site_admin lookup skipped ({se})")
+
             return jsonify({
                 'memberships': memberships,
                 'preferences': preferences,
+                'site_role': site_role,
+                'is_site_admin': is_site_admin,
                 'last_updated': (result['last_updated'].isoformat() if result and result.get('last_updated') else datetime.now().isoformat())
             }), 200
 
@@ -208,8 +226,26 @@ def sync_user_passport():
                 except Exception as e_up:
                     logger.info(f"passport.sync: upsert skipped ({e_up})")
 
+        site_role = None
+        is_site_admin = False
+        try:
+            reg_site = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+            site_table_exists = bool(reg_site and reg_site[0])
+            if site_table_exists:
+                site_row = conn.execute(
+                    text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                    {'uid': current_user_id}
+                ).mappings().first()
+                if site_row and site_row.get('role'):
+                    site_role = site_row['role']
+                    is_site_admin = True
+        except Exception as se:
+            logger.info(f"passport.sync: site_admin lookup skipped ({se})")
+
         return jsonify({
             'memberships': memberships,
+            'site_role': site_role,
+            'is_site_admin': is_site_admin,
             'last_updated': datetime.now().isoformat(),
             'message': 'Passport synced (best-effort)'
         }), 200
