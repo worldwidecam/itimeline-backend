@@ -26,7 +26,7 @@ from flask_jwt_extended import (
     verify_jwt_in_request
 )
 from flask_cors import CORS
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import os
@@ -556,6 +556,113 @@ def get_current_user_id():
         return get_jwt_identity()
     except Exception:
         return None
+
+
+def _normalize_username_policy(username):
+    return (str(username or '').strip()).lower()
+
+
+def _ensure_user_moderation_tables():
+    """Create user moderation and username blocklist tables if missing."""
+    with db.engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS user_moderation_state (
+                user_id INTEGER PRIMARY KEY,
+                require_username_change BOOLEAN NOT NULL DEFAULT FALSE,
+                restricted_until TIMESTAMPTZ NULL,
+                suspended_permanent BOOLEAN NOT NULL DEFAULT FALSE,
+                suspended_until TIMESTAMPTZ NULL,
+                reason TEXT NULL,
+                updated_by INTEGER NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS username_blocklist (
+                id SERIAL PRIMARY KEY,
+                username_normalized VARCHAR(80) NOT NULL UNIQUE,
+                reason TEXT NULL,
+                created_by INTEGER NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        ))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_username_blocklist_active ON username_blocklist (is_active);"))
+
+
+def _is_username_blocklisted(normalized_username):
+    if not normalized_username:
+        return False
+    _ensure_user_moderation_tables()
+    with db.engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT 1
+            FROM username_blocklist
+            WHERE username_normalized = :uname
+              AND is_active = TRUE
+            LIMIT 1
+            """
+        ), {'uname': normalized_username}).first()
+    return bool(row)
+
+
+def _get_user_moderation_state(user_id):
+    default_state = {
+        'require_username_change': False,
+        'is_restricted': False,
+        'restricted_until': None,
+        'is_suspended': False,
+        'suspended_permanent': False,
+        'suspended_until': None,
+    }
+    if not user_id:
+        return default_state
+
+    _ensure_user_moderation_tables()
+    with db.engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT require_username_change,
+                   restricted_until,
+                   suspended_permanent,
+                   suspended_until,
+                   (restricted_until IS NOT NULL AND restricted_until > NOW()) AS is_restricted,
+                   (suspended_permanent OR (suspended_until IS NOT NULL AND suspended_until > NOW())) AS is_suspended
+            FROM user_moderation_state
+            WHERE user_id = :uid
+            """
+        ), {'uid': int(user_id)}).mappings().first()
+
+    if not row:
+        return default_state
+
+    restricted_until = row.get('restricted_until')
+    suspended_until = row.get('suspended_until')
+    return {
+        'require_username_change': bool(row.get('require_username_change')),
+        'is_restricted': bool(row.get('is_restricted')),
+        'restricted_until': restricted_until.isoformat() if hasattr(restricted_until, 'isoformat') else None,
+        'is_suspended': bool(row.get('is_suspended')),
+        'suspended_permanent': bool(row.get('suspended_permanent')),
+        'suspended_until': suspended_until.isoformat() if hasattr(suspended_until, 'isoformat') else None,
+    }
+
+
+def _report_action_restriction(user_id):
+    state = _get_user_moderation_state(user_id)
+    if state['is_suspended']:
+        return 'Account is not permitted to perform this action.'
+    if state['require_username_change']:
+        return 'Username update required before continuing.'
+    if state['is_restricted']:
+        until = state.get('restricted_until')
+        return f"Account is temporarily restricted until {until}." if until else 'Account is temporarily restricted.'
+    return None
 
 
 def check_personal_timeline_access(timeline_id, required_role=None):
@@ -1106,6 +1213,9 @@ def create_post(timeline_id):
 def create_post_without_timeline():
     try:
         current_user_id = int(get_jwt_identity())
+        restriction_error = _report_action_restriction(current_user_id)
+        if restriction_error:
+            return jsonify({'error': restriction_error}), 403
         data = request.get_json()
 
         title = data.get('title')
@@ -1599,12 +1709,21 @@ def register():
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 400
         
+    username_raw = (data.get('username') or '').strip()
+    username_normalized = _normalize_username_policy(username_raw)
+
     # Check if username or email already exists
-    existing_user = User.query.filter_by(username=data['username']).first()
+    existing_user = User.query.filter(db.func.lower(User.username) == username_normalized).first()
     if existing_user:
         error_msg = "Username already taken"
         logger.error(error_msg)
         return jsonify({'error': error_msg}), 400
+
+    if _is_username_blocklisted(username_normalized):
+        return jsonify({
+            'error': 'Username is unavailable due to policy restrictions',
+            'code': 'USERNAME_BLOCKLISTED'
+        }), 400
         
     existing_email = User.query.filter_by(email=data['email']).first()
     if existing_email:
@@ -1615,7 +1734,7 @@ def register():
     try:
         # Create new user
         user = User(
-            username=data['username'],
+            username=username_raw,
             email=data['email']
         )
         user.set_password(data['password'])
@@ -1664,6 +1783,10 @@ def login():
             logger.error(f"Login failed: {error_msg}")
             return jsonify({'error': error_msg}), 401
 
+        moderation = _get_user_moderation_state(user.id)
+        if moderation['is_suspended']:
+            return jsonify({'error': 'Invalid email or password'}), 401
+
         # Create tokens
         access_token = create_access_token(identity=str(user.id))
         refresh_token = create_refresh_token(identity=str(user.id))
@@ -1678,7 +1801,11 @@ def login():
             'access_token': access_token,
             'refresh_token': refresh_token,
             'avatar_url': user.avatar_url,
-            'bio': user.bio
+            'bio': user.bio,
+            'must_change_username': moderation['require_username_change'],
+            'is_restricted': moderation['is_restricted'],
+            'restricted_until': moderation['restricted_until'],
+            'can_post_or_report': not (moderation['is_restricted'] or moderation['require_username_change'] or moderation['is_suspended']),
         }), 200
 
     except Exception as e:
@@ -1704,6 +1831,10 @@ def refresh():
             user = User.query.get(current_user_id)
             if not user:
                 return jsonify({'error': 'User not found'}), 404
+
+            moderation = _get_user_moderation_state(user.id)
+            if moderation['is_suspended']:
+                return jsonify({'error': 'Invalid refresh token'}), 401
 
             access_token = create_access_token(identity=current_user_id)
             return jsonify({
@@ -1743,6 +1874,9 @@ def validate_token():
         user = User.query.get(current_user_id)
         if not user:
             return jsonify({'error': 'User not found'}), 404
+        moderation = _get_user_moderation_state(user.id)
+        if moderation['is_suspended']:
+            return jsonify({'error': 'Session invalid'}), 401
             
         return jsonify({
             'valid': True,
@@ -1750,7 +1884,11 @@ def validate_token():
                 'id': user.id,
                 'email': user.email,
                 'username': user.username,
-                'avatar_url': user.avatar_url  # Include the avatar URL in the response
+                'avatar_url': user.avatar_url,  # Include the avatar URL in the response
+                'must_change_username': moderation['require_username_change'],
+                'is_restricted': moderation['is_restricted'],
+                'restricted_until': moderation['restricted_until'],
+                'can_post_or_report': not (moderation['is_restricted'] or moderation['require_username_change'] or moderation['is_suspended']),
             }
         }), 200
     except Exception as e:
@@ -1782,9 +1920,25 @@ def update_profile():
         form_data = request.form
         
         if 'username' in form_data and form_data['username'] != user.username:
-            if User.query.filter_by(username=form_data['username']).first():
+            normalized_username = _normalize_username_policy(form_data['username'])
+            if User.query.filter(db.func.lower(User.username) == normalized_username).first():
                 return jsonify({'error': 'Username already taken'}), 400
+            if _is_username_blocklisted(normalized_username):
+                return jsonify({'error': 'Username is unavailable due to policy restrictions'}), 400
             user.username = form_data['username']
+
+            _ensure_user_moderation_tables()
+            with db.engine.begin() as conn:
+                conn.execute(text(
+                    """
+                    INSERT INTO user_moderation_state (user_id, require_username_change, updated_by, updated_at)
+                    VALUES (:uid, FALSE, :uid, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET require_username_change = FALSE,
+                        updated_by = :uid,
+                        updated_at = NOW()
+                    """
+                ), {'uid': int(current_user_id)})
             
         if 'email' in form_data and form_data['email'] != user.email:
             if User.query.filter_by(email=form_data['email']).first():
@@ -1808,6 +1962,65 @@ def update_profile():
         db.session.rollback()
         logger.error(f"Error updating profile: {str(e)}")
         return jsonify({'error': 'Failed to update profile'}), 500
+
+
+@app.route('/api/auth/required-username-change', methods=['POST'])
+@app.route('/api/v1/auth/required-username-change', methods=['POST'])
+@jwt_required()
+def complete_required_username_change():
+    try:
+        current_user_id = int(get_jwt_identity())
+        user = User.query.get(current_user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
+        moderation = _get_user_moderation_state(current_user_id)
+        if moderation['is_suspended']:
+            return jsonify({'error': 'Account is not permitted to perform this action'}), 403
+
+        data = request.get_json(silent=True) or {}
+        new_username_raw = (data.get('username') or '').strip()
+        if not new_username_raw:
+            return jsonify({'error': 'username is required'}), 400
+
+        normalized = _normalize_username_policy(new_username_raw)
+        if User.query.filter(db.func.lower(User.username) == normalized, User.id != current_user_id).first():
+            return jsonify({'error': 'Username already taken'}), 400
+        if _is_username_blocklisted(normalized):
+            return jsonify({'error': 'Username is unavailable due to policy restrictions', 'code': 'USERNAME_BLOCKLISTED'}), 400
+
+        user.username = new_username_raw
+        db.session.commit()
+
+        _ensure_user_moderation_tables()
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                """
+                INSERT INTO user_moderation_state (user_id, require_username_change, updated_by, updated_at)
+                VALUES (:uid, FALSE, :uid, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET require_username_change = FALSE,
+                    updated_by = :uid,
+                    updated_at = NOW()
+                """
+            ), {'uid': current_user_id})
+
+        refreshed_state = _get_user_moderation_state(current_user_id)
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'avatar_url': user.avatar_url,
+            'bio': user.bio,
+            'must_change_username': refreshed_state['require_username_change'],
+            'is_restricted': refreshed_state['is_restricted'],
+            'restricted_until': refreshed_state['restricted_until'],
+            'can_post_or_report': not (refreshed_state['is_restricted'] or refreshed_state['require_username_change'] or refreshed_state['is_suspended']),
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error completing required username change: {str(e)}")
+        return jsonify({'error': 'Failed to update username'}), 500
 
 @app.route('/api/timeline-v3', methods=['GET'])
 @app.route('/api/v1/timeline-v3', methods=['GET'])
@@ -1918,6 +2131,8 @@ def get_timeline_v3(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
         timeline_id = int(timeline_id)
+    elif isinstance(timeline_id, str):
+        return jsonify({'error': 'Timeline not found'}), 404
     try:
         timeline = Timeline.query.get_or_404(timeline_id)
 
@@ -2154,6 +2369,8 @@ def get_timeline_v3_events(timeline_id):
     # Convert timeline_id to integer if it's numeric
     if isinstance(timeline_id, str) and timeline_id.isdigit():
         timeline_id = int(timeline_id)
+    elif isinstance(timeline_id, str):
+        return jsonify({'error': 'Timeline not found'}), 404
         
     try:
         # Get timeline
@@ -2496,6 +2713,9 @@ def get_timeline_v3_event(timeline_id, event_id):
 def create_timeline_v3_event(timeline_id):
     # Get the current user's ID from the JWT token
     current_user_id = get_jwt_identity()
+    restriction_error = _report_action_restriction(current_user_id)
+    if restriction_error:
+        return jsonify({'error': restriction_error}), 403
     try:
         # Get JSON data from request
         data = request.json

@@ -17,6 +17,39 @@ logger = logging.getLogger(__name__)
 # Create blueprint
 passport_bp = Blueprint('passport', __name__)
 
+
+def _get_user_moderation_snapshot(conn, user_id):
+    snapshot = {
+        'must_change_username': False,
+        'is_restricted': False,
+        'restricted_until': None,
+    }
+    try:
+        reg_mod = conn.execute(text("SELECT to_regclass('public.user_moderation_state')")).first()
+        if not (reg_mod and reg_mod[0]):
+            return snapshot
+
+        row = conn.execute(text(
+            """
+            SELECT require_username_change,
+                   restricted_until,
+                   (restricted_until IS NOT NULL AND restricted_until > NOW()) AS is_restricted
+            FROM user_moderation_state
+            WHERE user_id = :uid
+            """
+        ), {'uid': int(user_id)}).mappings().first()
+
+        if not row:
+            return snapshot
+
+        restricted_until = row.get('restricted_until')
+        snapshot['must_change_username'] = bool(row.get('require_username_change'))
+        snapshot['is_restricted'] = bool(row.get('is_restricted'))
+        snapshot['restricted_until'] = restricted_until.isoformat() if hasattr(restricted_until, 'isoformat') else None
+    except Exception as mod_e:
+        logger.info(f"passport: moderation snapshot lookup skipped ({mod_e})")
+    return snapshot
+
 @passport_bp.route('/user/passport', methods=['GET'])
 @jwt_required()
 def get_user_passport():
@@ -83,6 +116,7 @@ def get_user_passport():
 
             site_role = None
             is_site_admin = False
+            moderation = _get_user_moderation_snapshot(conn, current_user_id)
             try:
                 reg_site = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
                 site_table_exists = bool(reg_site and reg_site[0])
@@ -102,6 +136,9 @@ def get_user_passport():
                 'preferences': preferences,
                 'site_role': site_role,
                 'is_site_admin': is_site_admin,
+                'must_change_username': moderation['must_change_username'],
+                'is_restricted': moderation['is_restricted'],
+                'restricted_until': moderation['restricted_until'],
                 'last_updated': (result['last_updated'].isoformat() if result and result.get('last_updated') else datetime.now().isoformat())
             }), 200
 
@@ -123,8 +160,15 @@ def sync_user_passport():
         current_user_id = get_jwt_identity()
 
         memberships = []
-        from app import db  # local import to avoid circular dependency
-        with db.engine.begin() as conn:
+        site_role = None
+        is_site_admin = False
+        moderation = {
+            'must_change_username': False,
+            'is_restricted': False,
+            'restricted_until': None,
+        }
+        engine = get_db_engine()
+        with engine.begin() as conn:
             # Helper to check table existence safely
             def _exists(tbl: str) -> bool:
                 try:
@@ -226,26 +270,28 @@ def sync_user_passport():
                 except Exception as e_up:
                     logger.info(f"passport.sync: upsert skipped ({e_up})")
 
-        site_role = None
-        is_site_admin = False
-        try:
-            reg_site = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
-            site_table_exists = bool(reg_site and reg_site[0])
-            if site_table_exists:
-                site_row = conn.execute(
-                    text('SELECT role FROM site_admin WHERE user_id = :uid'),
-                    {'uid': current_user_id}
-                ).mappings().first()
-                if site_row and site_row.get('role'):
-                    site_role = site_row['role']
-                    is_site_admin = True
-        except Exception as se:
-            logger.info(f"passport.sync: site_admin lookup skipped ({se})")
+            moderation = _get_user_moderation_snapshot(conn, current_user_id)
+            try:
+                reg_site = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+                site_table_exists = bool(reg_site and reg_site[0])
+                if site_table_exists:
+                    site_row = conn.execute(
+                        text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                        {'uid': current_user_id}
+                    ).mappings().first()
+                    if site_row and site_row.get('role'):
+                        site_role = site_row['role']
+                        is_site_admin = True
+            except Exception as se:
+                logger.info(f"passport.sync: site_admin lookup skipped ({se})")
 
         return jsonify({
             'memberships': memberships,
             'site_role': site_role,
             'is_site_admin': is_site_admin,
+            'must_change_username': moderation['must_change_username'],
+            'is_restricted': moderation['is_restricted'],
+            'restricted_until': moderation['restricted_until'],
             'last_updated': datetime.now().isoformat(),
             'message': 'Passport synced (best-effort)'
         }), 200
