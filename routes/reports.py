@@ -1283,6 +1283,92 @@ def submit_user_report(reported_user_id):
     }), 200
 
 
+@reports_bp.route('/reports/timelines/<int:reported_timeline_id>', methods=['POST'])
+def submit_timeline_report(reported_timeline_id):
+    """
+    Submit a timeline-focused report ticket for Site Control workflows.
+    Authentication optional: if JWT exists, capture reporter_id.
+    Body: { reason?: string, category?: string }
+    """
+    reporter_id = None
+    try:
+        verify_jwt_in_request(optional=True)
+        reporter_id = get_jwt_identity()
+    except Exception:
+        reporter_id = None
+
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or '').strip()
+    category_raw = (data.get('category') or '').strip().lower()
+    allowed_categories = {'website_policy', 'government_policy', 'unethical_boundary'}
+    category = category_raw if category_raw in allowed_categories else None
+
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _ensure_user_moderation_tables(engine)
+
+    with engine.begin() as conn:
+        if reporter_id is not None:
+            restricted_msg = _get_report_submission_restriction(conn, reporter_id)
+            if restricted_msg:
+                return jsonify({'error': restricted_msg}), 403
+
+        timeline_row = conn.execute(text(
+            "SELECT id, created_by FROM timeline WHERE id = :tid LIMIT 1"
+        ), {'tid': int(reported_timeline_id)}).mappings().first()
+        if not timeline_row:
+            return jsonify({'error': 'Timeline not found'}), 404
+
+        is_protected_owner, protected_role = _is_site_protected_user(conn, timeline_row.get('created_by'))
+        if is_protected_owner:
+            return jsonify({
+                'error': f'{protected_role} timelines cannot be reported',
+                'code': 'PROTECTED_TIMELINE_NOT_REPORTABLE'
+            }), 403
+
+        row = conn.execute(text(
+            """
+            INSERT INTO reports (
+                timeline_id,
+                event_id,
+                reporter_id,
+                report_type,
+                reported_timeline_id,
+                reason,
+                status
+            )
+            VALUES (
+                :timeline_id,
+                NULL,
+                :reporter_id,
+                'timeline',
+                :reported_timeline_id,
+                :reason,
+                'pending'
+            )
+            RETURNING id, created_at
+            """
+        ), {
+            'timeline_id': int(reported_timeline_id),
+            'reporter_id': reporter_id,
+            'reported_timeline_id': int(reported_timeline_id),
+            'reason': (f"[{category}] " if category else "") + reason,
+        }).mappings().first()
+
+    return jsonify({
+        'success': True,
+        'timeline_id': int(reported_timeline_id),
+        'event_id': None,
+        'report_type': 'timeline',
+        'reported_timeline_id': int(reported_timeline_id),
+        'reason': (f"[{category}] " if category else "") + reason,
+        'reporter_id': reporter_id,
+        'status': 'pending',
+        'report_id': row['id'],
+        'received_at': (row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']))
+    }), 200
+
+
 @reports_bp.route('/timelines/<int:timeline_id>/reports/<int:report_id>/accept', methods=['POST'])
 @jwt_required()
 def accept_report(timeline_id, report_id):
