@@ -17,6 +17,67 @@ def ensure_timeline_block_list_table():
     except Exception as _e:
         app.logger.info(f"ensure_timeline_block_list_table skipped or failed: {_e}")
 
+
+def _normalize_timeline_policy_name(name):
+    raw = str(name or '').strip().lower().replace('#', '')
+    return ' '.join(raw.replace('-', ' ').split())
+
+
+def _get_active_banned_timeline_ids_and_names():
+    """Return active banned timeline ids and normalized names.
+    Safe fallback to empty sets if policy tables are unavailable.
+    """
+    try:
+        from sqlalchemy import text as _sql_text
+        rows = db.session.execute(_sql_text(
+            """
+            SELECT tbs.timeline_id, t.name
+            FROM timeline_ban_state tbs
+            LEFT JOIN timeline t ON t.id = tbs.timeline_id
+            WHERE tbs.is_active = TRUE
+            """
+        )).mappings().all()
+        banned_ids = set()
+        banned_names = set()
+        for row in rows:
+            tid = row.get('timeline_id')
+            if tid is not None:
+                banned_ids.add(int(tid))
+            normalized = _normalize_timeline_policy_name(row.get('name'))
+            if normalized:
+                banned_names.add(normalized)
+        return banned_ids, banned_names
+    except Exception as _e:
+        try:
+            app.logger.info(f"timeline ban lookup skipped or failed: {_e}")
+        except Exception:
+            pass
+        return set(), set()
+
+
+def _is_timeline_banned(timeline_id):
+    try:
+        from sqlalchemy import text as _sql_text
+        row = db.session.execute(_sql_text(
+            """
+            SELECT 1
+            FROM timeline_ban_state
+            WHERE timeline_id = :tid
+              AND is_active = TRUE
+            LIMIT 1
+            """
+        ), {'tid': int(timeline_id)}).first()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _banned_timeline_response(status_code=403):
+    return jsonify({
+        'error': 'This timeline has been banned',
+        'error_code': 'timeline_banned'
+    }), status_code
+
 from flask import Flask, request, jsonify, send_from_directory, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import (
@@ -2026,7 +2087,10 @@ def complete_required_username_change():
 @app.route('/api/v1/timeline-v3', methods=['GET'])
 def get_timelines_v3():
     try:
+        banned_timeline_ids, _ = _get_active_banned_timeline_ids_and_names()
         timelines = Timeline.query.order_by(Timeline.created_at.desc()).all()
+        if banned_timeline_ids:
+            timelines = [tl for tl in timelines if tl.id not in banned_timeline_ids]
         return jsonify([{
             'id': timeline.id,
             'name': timeline.name,
@@ -2134,6 +2198,9 @@ def get_timeline_v3(timeline_id):
     elif isinstance(timeline_id, str):
         return jsonify({'error': 'Timeline not found'}), 404
     try:
+        if _is_timeline_banned(timeline_id):
+            return _banned_timeline_response(403)
+
         timeline = Timeline.query.get_or_404(timeline_id)
 
         # Enforce personal timeline ACL
@@ -2373,6 +2440,11 @@ def get_timeline_v3_events(timeline_id):
         return jsonify({'error': 'Timeline not found'}), 404
         
     try:
+        if _is_timeline_banned(timeline_id):
+            return _banned_timeline_response(403)
+
+        banned_timeline_ids, banned_timeline_names = _get_active_banned_timeline_ids_and_names()
+
         # Get timeline
         timeline = Timeline.query.get(timeline_id)
         if not timeline:
@@ -2454,6 +2526,9 @@ def get_timeline_v3_events(timeline_id):
             tags = []
             for tag in event.tags:
                 app.logger.info(f"Processing tag: {tag.name} (ID: {tag.id})")
+                normalized_tag_name = _normalize_timeline_policy_name(tag.name)
+                if normalized_tag_name and normalized_tag_name in banned_timeline_names:
+                    continue
                 tags.append({'id': tag.id, 'name': tag.name})
 
             # Build associated_timelines: include owning timeline, explicit associations, and hashtag timelines derived from tags
@@ -2486,6 +2561,8 @@ def get_timeline_v3_events(timeline_id):
                             assoc_ids.append(int(tl['id']))
                 # De-duplicate
                 assoc_ids = sorted(set(assoc_ids))
+                if banned_timeline_ids:
+                    assoc_ids = [tid for tid in assoc_ids if tid not in banned_timeline_ids]
                 if assoc_ids:
                     # Fetch timeline details in one query, including owner info for personal timelines
                     tl_rows = db.session.execute(_sql_text(
@@ -2571,6 +2648,11 @@ def get_timeline_v3_event(timeline_id, event_id):
         event_id = int(event_id)
 
     try:
+        if _is_timeline_banned(timeline_id):
+            return _banned_timeline_response(403)
+
+        banned_timeline_ids, banned_timeline_names = _get_active_banned_timeline_ids_and_names()
+
         timeline = Timeline.query.get(timeline_id)
         if not timeline:
             return jsonify({'error': 'Timeline not found'}), 404
@@ -2615,7 +2697,12 @@ def get_timeline_v3_event(timeline_id, event_id):
             return jsonify({'error': 'Event does not belong to this timeline'}), 404
 
         # Tags
-        tags = [{'id': t.id, 'name': t.name} for t in event.tags]
+        tags = []
+        for t in event.tags:
+            normalized_tag_name = _normalize_timeline_policy_name(t.name)
+            if normalized_tag_name and normalized_tag_name in banned_timeline_names:
+                continue
+            tags.append({'id': t.id, 'name': t.name})
 
         # Build associated_timelines: include owning timeline, explicit associations, and hashtag timelines derived from tags
         associated_timelines = []
@@ -2647,6 +2734,8 @@ def get_timeline_v3_event(timeline_id, event_id):
                         assoc_ids.append(int(tl['id']))
             # De-duplicate
             assoc_ids = sorted(set(assoc_ids))
+            if banned_timeline_ids:
+                assoc_ids = [tid for tid in assoc_ids if tid not in banned_timeline_ids]
             if assoc_ids:
                 tl_rows = db.session.execute(_sql_text(
                     """
@@ -2957,7 +3046,10 @@ def create_timeline_v3_event(timeline_id):
             app.logger.info(f"Processing tags: {data['tags']}")
             for tag_name in data['tags']:
                 # Clean tag name
-                tag_name = tag_name.strip().lower()
+                tag_name = str(tag_name or '').strip().lower().replace('#', '')
+                # Canonical hashtag naming: treat hyphens as spaces to avoid
+                # duplicate timeline materialization (e.g., BAN-TEST vs BAN TEST).
+                tag_name = ' '.join(tag_name.replace('-', ' ').split())
                 if not tag_name:
                     continue
 
@@ -2981,7 +3073,8 @@ def create_timeline_v3_event(timeline_id):
                         Timeline.timeline_type == 'hashtag',
                         db.or_(
                             db.func.lower(Timeline.name) == tag_name,
-                            db.func.lower(Timeline.name) == f"#{tag_name}"
+                            db.func.lower(Timeline.name) == f"#{tag_name}",
+                            db.func.replace(db.func.lower(Timeline.name), '-', ' ') == tag_name
                         )
                     ).first()
 
@@ -3024,7 +3117,8 @@ def create_timeline_v3_event(timeline_id):
                                 Timeline.timeline_type == 'hashtag',
                                 db.or_(
                                     db.func.lower(Timeline.name) == tag_name,
-                                    db.func.lower(Timeline.name) == f"#{tag_name}"
+                                    db.func.lower(Timeline.name) == f"#{tag_name}",
+                                    db.func.replace(db.func.lower(Timeline.name), '-', ' ') == tag_name
                                 )
                             ).first()
 
@@ -3423,10 +3517,16 @@ def get_timeline_v3_by_name(timeline_name):
     try:
         # Convert the timeline name to uppercase to match our standardized format
         timeline_name_upper = timeline_name.upper()
+        timeline_name_normalized = _normalize_timeline_policy_name(timeline_name)
+        banned_timeline_ids, banned_timeline_names = _get_active_banned_timeline_ids_and_names()
         
         # Find timelines by name (case-insensitive) and prefer hashtag-type timelines
         candidates = Timeline.query.filter(Timeline.name == timeline_name_upper).all()
+        if banned_timeline_ids:
+            candidates = [t for t in candidates if t.id not in banned_timeline_ids]
         if not candidates:
+            if timeline_name_normalized and timeline_name_normalized in banned_timeline_names:
+                return jsonify({'error': 'Timeline not found'}), 404
             return jsonify({'error': 'Timeline not found'}), 404
 
         # Prefer a hashtag timeline when multiple share the same base name

@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, verify_jwt_in_request, get_jwt_identity
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 from sqlalchemy import text
 from utils.db_helper import get_db_engine
@@ -162,6 +162,156 @@ def _parse_iso_datetime_utc(value):
         return None
 
 
+def _ensure_report_policy_tables(engine):
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS report_safeguard_cooldown (
+                id SERIAL PRIMARY KEY,
+                target_type VARCHAR(16) NOT NULL,
+                target_id INTEGER NOT NULL,
+                scope VARCHAR(64) NOT NULL,
+                safe_until TIMESTAMPTZ NOT NULL,
+                source_report_id INTEGER NOT NULL UNIQUE,
+                created_by INTEGER NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_report_safeguard_target_scope ON report_safeguard_cooldown (target_type, target_id, scope);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_report_safeguard_safe_until ON report_safeguard_cooldown (safe_until);"))
+
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_warning_state (
+                timeline_id INTEGER PRIMARY KEY,
+                warning_scope VARCHAR(32) NOT NULL DEFAULT 'other',
+                warning_reason_public TEXT NOT NULL,
+                mask_content BOOLEAN NOT NULL DEFAULT TRUE,
+                warning_until TIMESTAMPTZ NOT NULL,
+                source_report_id INTEGER NOT NULL UNIQUE,
+                updated_by INTEGER NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        ))
+
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_ban_state (
+                timeline_id INTEGER PRIMARY KEY,
+                ban_reason_public TEXT NOT NULL,
+                source_report_id INTEGER NOT NULL UNIQUE,
+                updated_by INTEGER NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        ))
+
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_name_blocklist (
+                id SERIAL PRIMARY KEY,
+                timeline_name_normalized VARCHAR(120) NOT NULL UNIQUE,
+                reason TEXT NULL,
+                source_report_id INTEGER NULL,
+                created_by INTEGER NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_timeline_name_blocklist_active ON timeline_name_blocklist (is_active);"))
+
+
+def _parse_safeguard_until(data, allow_custom):
+    safe_until = None
+    if allow_custom:
+        safe_until = _parse_iso_datetime_utc(data.get('safe_until'))
+        if safe_until is not None:
+            if safe_until <= datetime.now(timezone.utc):
+                return None, 'safe_until must be in the future'
+            return safe_until, None
+
+    days = data.get('safeguard_days', 7)
+    try:
+        days = int(days)
+    except Exception:
+        return None, 'safeguard_days must be an integer'
+    if days not in {3, 7, 10}:
+        return None, 'safeguard_days must be one of: 3, 7, 10'
+    return datetime.now(timezone.utc) + timedelta(days=days), None
+
+
+def _normalize_warning_scope(raw_scope):
+    scope = str(raw_scope or '').strip().lower()
+    if scope in {'general', 'timeline_profile', 'other'}:
+        return 'general'
+    if scope in {'action_cards', 'quote_card'}:
+        return 'action_cards'
+    return 'general'
+
+
+def _parse_warning_until(data, allow_custom):
+    if bool(data.get('warning_indef')):
+        return datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc), None
+
+    if allow_custom:
+        custom_until = _parse_iso_datetime_utc(data.get('warning_until'))
+        if custom_until is not None:
+            if custom_until <= datetime.now(timezone.utc):
+                return None, 'warning_until must be in the future'
+            return custom_until, None
+
+    days = data.get('warning_days', 7)
+    try:
+        days = int(days)
+    except Exception:
+        return None, 'warning_days must be an integer'
+    if days not in {3, 7, 10}:
+        return None, 'warning_days must be one of: 3, 7, 10'
+    return datetime.now(timezone.utc) + timedelta(days=days), None
+
+
+def _get_active_safeguard_lock(conn, target_type, target_id, scopes):
+    if target_id in (None, ''):
+        return None
+    scope_list = [str(s) for s in (scopes or []) if s]
+    if not scope_list:
+        return None
+    row = conn.execute(text(
+        """
+        SELECT scope, safe_until
+        FROM report_safeguard_cooldown
+        WHERE target_type = :target_type
+          AND target_id = :target_id
+          AND scope = ANY(:scopes)
+          AND is_active = TRUE
+          AND safe_until > NOW()
+        ORDER BY safe_until DESC
+        LIMIT 1
+        """
+    ), {
+        'target_type': str(target_type),
+        'target_id': int(target_id),
+        'scopes': scope_list,
+    }).mappings().first()
+    if not row:
+        return None
+    return {
+        'scope': row.get('scope'),
+        'safe_until': row.get('safe_until')
+    }
+
+
+def _normalize_timeline_name_policy(name):
+    return (str(name or '').strip()).lower()
+
+
 def _get_user_moderation_state(conn, user_id):
     if not user_id:
         return {
@@ -268,6 +418,7 @@ def list_reports(timeline_id):
 
     engine = get_db_engine()
     _ensure_reports_table(engine)
+    _ensure_report_policy_tables(engine)
     _ensure_user_moderation_tables(engine)
 
     where_clause = "WHERE timeline_id = :timeline_id AND status <> 'escalated' AND COALESCE(report_type, 'post') = 'post'"
@@ -318,11 +469,18 @@ def list_reports(timeline_id):
                    r.created_at,
                    r.updated_at,
                    r.resolved_at,
+                   rsc.safe_until AS safeguard_safe_until,
+                   tws.warning_scope,
+                   tws.mask_content AS warning_mask_content,
+                   tws.warning_until,
+                   tws.is_active AS warning_is_active,
                    u.username AS reporter_username,
                    u.avatar_url AS reporter_avatar_url,
                    a.username AS assigned_to_username,
                    a.avatar_url AS assigned_to_avatar_url
             FROM reports r
+            LEFT JOIN report_safeguard_cooldown rsc ON rsc.source_report_id = r.id
+            LEFT JOIN timeline_warning_state tws ON tws.source_report_id = r.id
             LEFT JOIN "user" u ON u.id = r.reporter_id
             LEFT JOIN "user" a ON a.id = r.assigned_to
             {where_clause.replace('WHERE', 'WHERE')}
@@ -435,6 +593,7 @@ def list_site_reports():
 
     engine = get_db_engine()
     _ensure_reports_table(engine)
+    _ensure_report_policy_tables(engine)
 
     with engine.begin() as conn:
         has_access, _role = _require_site_admin(conn, get_jwt_identity())
@@ -511,6 +670,11 @@ def list_site_reports():
                    r.created_at,
                    r.updated_at,
                    r.resolved_at,
+                   rsc.safe_until AS safeguard_safe_until,
+                   tws.warning_scope,
+                   tws.mask_content AS warning_mask_content,
+                   tws.warning_until,
+                   tws.is_active AS warning_is_active,
                    u.username AS reporter_username,
                    u.avatar_url AS reporter_avatar_url,
                    a.username AS assigned_to_username,
@@ -522,6 +686,8 @@ def list_site_reports():
                    rt.name AS reported_timeline_name,
                    rt.timeline_type AS reported_timeline_type
             FROM reports r
+            LEFT JOIN report_safeguard_cooldown rsc ON rsc.source_report_id = r.id
+            LEFT JOIN timeline_warning_state tws ON tws.source_report_id = r.id
             LEFT JOIN "user" u ON u.id = r.reporter_id
             LEFT JOIN "user" a ON a.id = r.assigned_to
             LEFT JOIN "user" ru ON ru.id = r.reported_user_id
@@ -565,6 +731,11 @@ def list_site_reports():
             'reported_at': (r['created_at'].isoformat() if hasattr(r['created_at'], 'isoformat') else str(r['created_at'])),
             'updated_at': (r['updated_at'].isoformat() if hasattr(r['updated_at'], 'isoformat') else str(r['updated_at'])),
             'resolved_at': (r['resolved_at'].isoformat() if r['resolved_at'] and hasattr(r['resolved_at'], 'isoformat') else (r['resolved_at'] and str(r['resolved_at']) or None)),
+            'safeguard_safe_until': (r['safeguard_safe_until'].isoformat() if r.get('safeguard_safe_until') and hasattr(r['safeguard_safe_until'], 'isoformat') else (r.get('safeguard_safe_until') and str(r['safeguard_safe_until']) or None)),
+            'warning_scope': r.get('warning_scope'),
+            'warning_mask_content': bool(r.get('warning_mask_content')) if r.get('warning_mask_content') is not None else None,
+            'warning_until': (r['warning_until'].isoformat() if r.get('warning_until') and hasattr(r['warning_until'], 'isoformat') else (r.get('warning_until') and str(r['warning_until']) or None)),
+            'warning_is_active': bool(r.get('warning_is_active')) if r.get('warning_is_active') is not None else None,
             'event_type': None,
         })
 
@@ -682,7 +853,7 @@ def resolve_site_report(report_id):
     """
     data = request.get_json(silent=True) or {}
     action = str(data.get('action', '')).lower()
-    if action not in {'remove', 'delete', 'safeguard', 'edit', 'require_username_change', 'restrict_user', 'suspend_user'}:
+    if action not in {'remove', 'delete', 'safeguard', 'edit', 'require_username_change', 'restrict_user', 'suspend_user', 'issue_warning', 'ban_timeline'}:
         return jsonify({'error': 'Invalid action'}), 400
     verdict = (data.get('verdict') or '').strip()
     lock_edit = bool(data.get('lock_edit'))
@@ -692,6 +863,7 @@ def resolve_site_report(report_id):
     engine = get_db_engine()
     _ensure_reports_table(engine)
     _ensure_user_moderation_tables(engine)
+    _ensure_report_policy_tables(engine)
 
     full_delete_required = False
     full_delete_reason = None
@@ -703,6 +875,9 @@ def resolve_site_report(report_id):
     media_deleted = False
     moderation_update = None
     username_blocked = False
+    safeguard_safe_until = None
+    warning_until = None
+    banned_timeline_id = None
 
     with engine.begin() as conn:
         has_access, _role = _require_site_admin(conn, get_jwt_identity())
@@ -719,16 +894,19 @@ def resolve_site_report(report_id):
         if not rep:
             return jsonify({'error': 'Report not found'}), 404
         report_type = str(rep.get('report_type') or 'post').lower()
-        if report_type == 'post' and action in {'require_username_change', 'restrict_user', 'suspend_user'}:
-            return jsonify({'error': f"Action '{action}' is only supported for user tickets"}), 400
-        if report_type == 'user' and action in {'delete', 'remove', 'edit'}:
-            return jsonify({'error': f"Action '{action}' is only supported for post tickets"}), 400
-        if report_type not in {'post', 'user'} and action in {'delete', 'remove', 'edit', 'require_username_change', 'restrict_user', 'suspend_user'}:
+        if report_type == 'post' and action in {'require_username_change', 'restrict_user', 'suspend_user', 'issue_warning', 'ban_timeline'}:
+            return jsonify({'error': f"Action '{action}' is not supported for post tickets"}), 400
+        if report_type == 'user' and action in {'delete', 'remove', 'edit', 'issue_warning', 'ban_timeline'}:
+            return jsonify({'error': f"Action '{action}' is not supported for user tickets"}), 400
+        if report_type == 'timeline' and action in {'delete', 'remove', 'edit', 'require_username_change', 'restrict_user', 'suspend_user'}:
             return jsonify({'error': f"Action '{action}' is not supported for this ticket type"}), 400
+        if report_type not in {'post', 'user', 'timeline'}:
+            return jsonify({'error': 'Unsupported report type'}), 400
 
         event_id_for_report = int(rep['event_id']) if rep.get('event_id') is not None else None
         timeline_id = int(rep['timeline_id']) if rep.get('timeline_id') is not None else None
         reported_user_id = int(rep['reported_user_id']) if rep.get('reported_user_id') is not None else None
+        reported_timeline_id = int(rep['reported_timeline_id']) if rep.get('reported_timeline_id') is not None else None
 
         res = conn.execute(text(
             """
@@ -757,6 +935,192 @@ def resolve_site_report(report_id):
                 ), {'eid': event_id_for_report})
             except Exception:
                 pass
+
+        if action == 'safeguard':
+            target_type = None
+            target_id = None
+            scope = 'site_global'
+            if report_type == 'post' and event_id_for_report is not None:
+                target_type = 'post'
+                target_id = event_id_for_report
+            elif report_type == 'user' and reported_user_id is not None:
+                target_type = 'user'
+                target_id = reported_user_id
+            elif report_type == 'timeline' and (reported_timeline_id is not None or timeline_id is not None):
+                target_type = 'timeline'
+                target_id = reported_timeline_id if reported_timeline_id is not None else timeline_id
+
+            if target_type is None or target_id is None:
+                return jsonify({'error': 'Unable to determine safeguard target'}), 400
+
+            parsed_until, parse_err = _parse_safeguard_until(data, allow_custom=True)
+            if parse_err:
+                return jsonify({'error': parse_err}), 400
+
+            safeguard_safe_until = parsed_until
+            conn.execute(text(
+                """
+                INSERT INTO report_safeguard_cooldown (
+                    target_type,
+                    target_id,
+                    scope,
+                    safe_until,
+                    source_report_id,
+                    created_by,
+                    is_active
+                )
+                VALUES (
+                    :target_type,
+                    :target_id,
+                    :scope,
+                    :safe_until,
+                    :source_report_id,
+                    :created_by,
+                    TRUE
+                )
+                ON CONFLICT (source_report_id) DO UPDATE
+                SET target_type = EXCLUDED.target_type,
+                    target_id = EXCLUDED.target_id,
+                    scope = EXCLUDED.scope,
+                    safe_until = EXCLUDED.safe_until,
+                    created_by = EXCLUDED.created_by,
+                    is_active = TRUE
+                """
+            ), {
+                'target_type': target_type,
+                'target_id': target_id,
+                'scope': scope,
+                'safe_until': safeguard_safe_until,
+                'source_report_id': int(report_id),
+                'created_by': get_user_id(),
+            })
+
+        if action == 'issue_warning' and report_type == 'timeline':
+            target_timeline_id = reported_timeline_id if reported_timeline_id is not None else timeline_id
+            if target_timeline_id is None:
+                return jsonify({'error': 'Timeline ticket missing timeline target'}), 400
+            warning_scope = _normalize_warning_scope(data.get('warning_scope'))
+            mask_content = bool(data.get('mask_content', True))
+            warning_until, warning_parse_err = _parse_warning_until(data, allow_custom=True)
+            if warning_parse_err:
+                return jsonify({'error': warning_parse_err}), 400
+            conn.execute(text(
+                """
+                INSERT INTO timeline_warning_state (
+                    timeline_id,
+                    warning_scope,
+                    warning_reason_public,
+                    mask_content,
+                    warning_until,
+                    source_report_id,
+                    updated_by,
+                    is_active,
+                    updated_at
+                )
+                VALUES (
+                    :timeline_id,
+                    :warning_scope,
+                    :reason,
+                    :mask_content,
+                    :warning_until,
+                    :source_report_id,
+                    :updated_by,
+                    TRUE,
+                    NOW()
+                )
+                ON CONFLICT (timeline_id) DO UPDATE
+                SET warning_scope = EXCLUDED.warning_scope,
+                    warning_reason_public = EXCLUDED.warning_reason_public,
+                    mask_content = EXCLUDED.mask_content,
+                    warning_until = EXCLUDED.warning_until,
+                    source_report_id = EXCLUDED.source_report_id,
+                    updated_by = EXCLUDED.updated_by,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                """
+            ), {
+                'timeline_id': target_timeline_id,
+                'warning_scope': warning_scope,
+                'reason': verdict,
+                'mask_content': mask_content,
+                'warning_until': warning_until,
+                'source_report_id': int(report_id),
+                'updated_by': get_user_id(),
+            })
+
+        if action == 'ban_timeline' and report_type == 'timeline':
+            target_timeline_id = reported_timeline_id if reported_timeline_id is not None else timeline_id
+            if target_timeline_id is None:
+                return jsonify({'error': 'Timeline ticket missing timeline target'}), 400
+            banned_timeline_id = int(target_timeline_id)
+            timeline_row = conn.execute(text(
+                "SELECT name FROM timeline WHERE id = :tid LIMIT 1"
+            ), {'tid': banned_timeline_id}).mappings().first()
+            normalized_timeline_name = _normalize_timeline_name_policy(timeline_row.get('name') if timeline_row else '')
+
+            conn.execute(text(
+                """
+                INSERT INTO timeline_ban_state (
+                    timeline_id,
+                    ban_reason_public,
+                    source_report_id,
+                    updated_by,
+                    is_active,
+                    banned_at,
+                    updated_at
+                )
+                VALUES (
+                    :timeline_id,
+                    :reason,
+                    :source_report_id,
+                    :updated_by,
+                    TRUE,
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (timeline_id) DO UPDATE
+                SET ban_reason_public = EXCLUDED.ban_reason_public,
+                    source_report_id = EXCLUDED.source_report_id,
+                    updated_by = EXCLUDED.updated_by,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                """
+            ), {
+                'timeline_id': banned_timeline_id,
+                'reason': verdict,
+                'source_report_id': int(report_id),
+                'updated_by': get_user_id(),
+            })
+
+            if normalized_timeline_name:
+                conn.execute(text(
+                    """
+                    INSERT INTO timeline_name_blocklist (
+                        timeline_name_normalized,
+                        reason,
+                        source_report_id,
+                        created_by,
+                        is_active
+                    )
+                    VALUES (
+                        :timeline_name_normalized,
+                        :reason,
+                        :source_report_id,
+                        :created_by,
+                        TRUE
+                    )
+                    ON CONFLICT (timeline_name_normalized) DO UPDATE
+                    SET reason = EXCLUDED.reason,
+                        source_report_id = EXCLUDED.source_report_id,
+                        created_by = EXCLUDED.created_by,
+                        is_active = TRUE
+                    """
+                ), {
+                    'timeline_name_normalized': normalized_timeline_name,
+                    'reason': verdict,
+                    'source_report_id': int(report_id),
+                    'created_by': get_user_id(),
+                })
 
         if action == 'remove':
             from sqlalchemy import text as _sql_text
@@ -1099,6 +1463,9 @@ def resolve_site_report(report_id):
         'verdict': res['verdict'],
         'new_status': res['status'],
         'resolved_at': (res['resolved_at'].isoformat() if hasattr(res['resolved_at'], 'isoformat') else str(res['resolved_at'])),
+        'safeguard_safe_until': (safeguard_safe_until.isoformat() if hasattr(safeguard_safe_until, 'isoformat') else None),
+        'warning_until': (warning_until.isoformat() if hasattr(warning_until, 'isoformat') else None),
+        'banned_timeline_id': banned_timeline_id,
         'full_delete_required': full_delete_required,
         'full_delete_reason': full_delete_reason,
         'event_id': event_id_for_report,
@@ -1111,6 +1478,174 @@ def resolve_site_report(report_id):
         'username_blocked': username_blocked,
         'blocked': (True if action == 'remove' else False),
         'removed_timeline_ids': removed_timeline_ids_resp
+    }), 200
+
+
+@reports_bp.route('/reports/<int:report_id>/timeline-unban', methods=['POST'])
+@jwt_required()
+def unban_timeline_from_report(report_id):
+    """
+    SiteOwner-only: reverse an existing timeline ban resolution.
+    - Deactivates timeline_ban_state and matching timeline_name_blocklist entries.
+    - Archives the original resolved report ticket.
+    """
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _ensure_report_policy_tables(engine)
+
+    with engine.begin() as conn:
+        has_access, role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+        if role != 'SiteOwner':
+            return jsonify({'error': 'Only SiteOwner can unban timelines from tickets'}), 403
+
+        rep = conn.execute(text(
+            """
+            SELECT id, report_type, resolution, reported_timeline_id, timeline_id
+            FROM reports
+            WHERE id = :rid
+            """
+        ), {'rid': report_id}).mappings().first()
+        if not rep:
+            return jsonify({'error': 'Report not found'}), 404
+        if str(rep.get('report_type') or '').lower() != 'timeline' or str(rep.get('resolution') or '').lower() != 'ban_timeline':
+            return jsonify({'error': 'Report is not a timeline ban resolution'}), 400
+
+        target_timeline_id = rep.get('reported_timeline_id') if rep.get('reported_timeline_id') is not None else rep.get('timeline_id')
+        if target_timeline_id is None:
+            return jsonify({'error': 'Timeline target missing on report'}), 400
+        target_timeline_id = int(target_timeline_id)
+
+        timeline_row = conn.execute(text(
+            "SELECT name FROM timeline WHERE id = :tid LIMIT 1"
+        ), {'tid': target_timeline_id}).mappings().first()
+        normalized_name = _normalize_timeline_name_policy(timeline_row.get('name') if timeline_row else '')
+
+        conn.execute(text(
+            """
+            UPDATE timeline_ban_state
+            SET is_active = FALSE,
+                updated_at = NOW(),
+                updated_by = :actor
+            WHERE timeline_id = :tid
+            """
+        ), {'tid': target_timeline_id, 'actor': get_user_id()})
+
+        if normalized_name:
+            conn.execute(text(
+                """
+                UPDATE timeline_name_blocklist
+                SET is_active = FALSE,
+                    created_by = :actor
+                WHERE timeline_name_normalized = :name
+                """
+            ), {'name': normalized_name, 'actor': get_user_id()})
+
+        conn.execute(text(
+            """
+            UPDATE reports
+            SET status = 'archived',
+                updated_at = NOW()
+            WHERE id = :rid
+            """
+        ), {'rid': report_id})
+
+    return jsonify({
+        'success': True,
+        'report_id': report_id,
+        'timeline_id': target_timeline_id,
+        'new_status': 'archived',
+        'message': 'Timeline unbanned and ticket archived'
+    }), 200
+
+
+@reports_bp.route('/reports/<int:report_id>/timeline-warning-lift', methods=['POST'])
+@jwt_required()
+def lift_timeline_warning_from_report(report_id):
+    """
+    SiteOwner/SiteAdmin: deactivate timeline warning for a warning-resolved ticket.
+    """
+    engine = get_db_engine()
+    _ensure_reports_table(engine)
+    _ensure_report_policy_tables(engine)
+
+    with engine.begin() as conn:
+        has_access, _role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        rep = conn.execute(text(
+            """
+            SELECT id, report_type, resolution, reported_timeline_id, timeline_id
+            FROM reports
+            WHERE id = :rid
+            """
+        ), {'rid': report_id}).mappings().first()
+        if not rep:
+            return jsonify({'error': 'Report not found'}), 404
+        if str(rep.get('report_type') or '').lower() != 'timeline' or str(rep.get('resolution') or '').lower() != 'issue_warning':
+            return jsonify({'error': 'Report is not a timeline warning resolution'}), 400
+
+        target_timeline_id = rep.get('reported_timeline_id') if rep.get('reported_timeline_id') is not None else rep.get('timeline_id')
+        if target_timeline_id is None:
+            return jsonify({'error': 'Timeline target missing on report'}), 400
+        target_timeline_id = int(target_timeline_id)
+
+        conn.execute(text(
+            """
+            UPDATE timeline_warning_state
+            SET is_active = FALSE,
+                updated_at = NOW(),
+                updated_by = :actor
+            WHERE timeline_id = :tid
+            """
+        ), {'tid': target_timeline_id, 'actor': get_user_id()})
+
+    return jsonify({
+        'success': True,
+        'report_id': report_id,
+        'timeline_id': target_timeline_id,
+        'message': 'Timeline warning lifted'
+    }), 200
+
+
+@reports_bp.route('/timelines/<int:timeline_id>/warning-state', methods=['GET'])
+def get_timeline_warning_state(timeline_id):
+    """
+    Public warning status for timeline UI.
+    Returns active warning metadata when warning_until is in the future.
+    """
+    engine = get_db_engine()
+    _ensure_report_policy_tables(engine)
+
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT warning_scope,
+                   warning_reason_public,
+                   mask_content,
+                   warning_until,
+                   is_active
+            FROM timeline_warning_state
+            WHERE timeline_id = :tid
+              AND is_active = TRUE
+              AND warning_until > NOW()
+            LIMIT 1
+            """
+        ), {'tid': int(timeline_id)}).mappings().first()
+
+    if not row:
+        return jsonify({'active': False, 'timeline_id': int(timeline_id)}), 200
+
+    return jsonify({
+        'active': True,
+        'timeline_id': int(timeline_id),
+        'warning_scope': _normalize_warning_scope(row.get('warning_scope')),
+        'warning_reason_public': row.get('warning_reason_public') or '',
+        'mask_content': bool(row.get('mask_content')),
+        'warning_until': (row['warning_until'].isoformat() if row.get('warning_until') and hasattr(row['warning_until'], 'isoformat') else (row.get('warning_until') and str(row['warning_until']) or None)),
+        'is_indef': bool(row.get('warning_until') and hasattr(row.get('warning_until'), 'year') and row.get('warning_until').year >= 9999),
     }), 200
 
 
@@ -1149,6 +1684,7 @@ def submit_report(timeline_id):
     engine = get_db_engine()
     _ensure_reports_table(engine)
     _ensure_user_moderation_tables(engine)
+    _ensure_report_policy_tables(engine)
 
     with engine.begin() as conn:
         if reporter_id is not None:
@@ -1170,6 +1706,21 @@ def submit_report(timeline_id):
                 'error': f'{protected_role} accounts cannot be reported',
                 'code': 'PROTECTED_ACCOUNT_NOT_REPORTABLE'
             }), 403
+
+        active_lock = _get_active_safeguard_lock(
+            conn,
+            target_type='post',
+            target_id=int(event_id),
+            scopes=[f'community_timeline:{int(timeline_id)}', 'site_global']
+        )
+        if active_lock:
+            safe_until = active_lock.get('safe_until')
+            return jsonify({
+                'error': 'Reporting is temporarily disabled for this item',
+                'code': 'REPORT_SAFEGUARD_ACTIVE',
+                'scope': active_lock.get('scope'),
+                'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
+            }), 429
 
         row = conn.execute(text(
             """
@@ -1226,6 +1777,7 @@ def submit_user_report(reported_user_id):
     engine = get_db_engine()
     _ensure_reports_table(engine)
     _ensure_user_moderation_tables(engine)
+    _ensure_report_policy_tables(engine)
 
     with engine.begin() as conn:
         if reporter_id is not None:
@@ -1239,6 +1791,21 @@ def submit_user_report(reported_user_id):
                 'error': f'{protected_role} accounts cannot be reported',
                 'code': 'PROTECTED_ACCOUNT_NOT_REPORTABLE'
             }), 403
+
+        active_lock = _get_active_safeguard_lock(
+            conn,
+            target_type='user',
+            target_id=int(reported_user_id),
+            scopes=['site_global']
+        )
+        if active_lock:
+            safe_until = active_lock.get('safe_until')
+            return jsonify({
+                'error': 'Reporting is temporarily disabled for this user',
+                'code': 'REPORT_SAFEGUARD_ACTIVE',
+                'scope': active_lock.get('scope'),
+                'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
+            }), 429
 
         row = conn.execute(text(
             """
@@ -1306,6 +1873,7 @@ def submit_timeline_report(reported_timeline_id):
     engine = get_db_engine()
     _ensure_reports_table(engine)
     _ensure_user_moderation_tables(engine)
+    _ensure_report_policy_tables(engine)
 
     with engine.begin() as conn:
         if reporter_id is not None:
@@ -1325,6 +1893,21 @@ def submit_timeline_report(reported_timeline_id):
                 'error': f'{protected_role} timelines cannot be reported',
                 'code': 'PROTECTED_TIMELINE_NOT_REPORTABLE'
             }), 403
+
+        active_lock = _get_active_safeguard_lock(
+            conn,
+            target_type='timeline',
+            target_id=int(reported_timeline_id),
+            scopes=[f'community_timeline:{int(reported_timeline_id)}', 'site_global']
+        )
+        if active_lock:
+            safe_until = active_lock.get('safe_until')
+            return jsonify({
+                'error': 'Reporting is temporarily disabled for this timeline',
+                'code': 'REPORT_SAFEGUARD_ACTIVE',
+                'scope': active_lock.get('scope'),
+                'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
+            }), 429
 
         row = conn.execute(text(
             """
@@ -1433,10 +2016,12 @@ def resolve_report(timeline_id, report_id):
     actor_id = get_user_id()
     engine = get_db_engine()
     _ensure_reports_table(engine)
+    _ensure_report_policy_tables(engine)
 
     full_delete_required = False
     full_delete_reason = None
     event_id_for_report = None
+    safeguard_safe_until = None
     # Deletion metrics (populated when action == 'delete')
     deleted_event = False
     deleted_assoc_total = None
@@ -1472,6 +2057,47 @@ def resolve_report(timeline_id, report_id):
         ), {'action': action, 'verdict': verdict, 'actor': actor_id, 'rid': report_id, 'tid': timeline_id}).mappings().first()
         if not res:
             return jsonify({'error': 'Report not found'}), 404
+
+        if action == 'safeguard':
+            parsed_until, parse_err = _parse_safeguard_until(data, allow_custom=False)
+            if parse_err:
+                return jsonify({'error': parse_err}), 400
+            safeguard_safe_until = parsed_until
+            conn.execute(text(
+                """
+                INSERT INTO report_safeguard_cooldown (
+                    target_type,
+                    target_id,
+                    scope,
+                    safe_until,
+                    source_report_id,
+                    created_by,
+                    is_active
+                )
+                VALUES (
+                    'post',
+                    :target_id,
+                    :scope,
+                    :safe_until,
+                    :source_report_id,
+                    :created_by,
+                    TRUE
+                )
+                ON CONFLICT (source_report_id) DO UPDATE
+                SET target_type = EXCLUDED.target_type,
+                    target_id = EXCLUDED.target_id,
+                    scope = EXCLUDED.scope,
+                    safe_until = EXCLUDED.safe_until,
+                    created_by = EXCLUDED.created_by,
+                    is_active = TRUE
+                """
+            ), {
+                'target_id': event_id_for_report,
+                'scope': f'community_timeline:{int(timeline_id)}',
+                'safe_until': safeguard_safe_until,
+                'source_report_id': int(report_id),
+                'created_by': actor_id,
+            })
 
         # If action is 'remove', enforce blocklist-based removal with "exists elsewhere" rule
         if action == 'remove':
@@ -1691,6 +2317,7 @@ def resolve_report(timeline_id, report_id):
         'verdict': res['verdict'],
         'new_status': res['status'],
         'resolved_at': (res['resolved_at'].isoformat() if hasattr(res['resolved_at'], 'isoformat') else str(res['resolved_at'])),
+        'safeguard_safe_until': (safeguard_safe_until.isoformat() if hasattr(safeguard_safe_until, 'isoformat') else None),
         'full_delete_required': full_delete_required,
         'full_delete_reason': full_delete_reason,
         'event_id': event_id_for_report,
