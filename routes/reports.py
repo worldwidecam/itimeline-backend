@@ -11,6 +11,10 @@ from routes.community import check_timeline_access, get_user_id
 reports_bp = Blueprint('reports', __name__)
 logger = logging.getLogger(__name__)
 
+STATUS_HEADER_WORD_LIMIT = 4
+STATUS_HEADER_MAX_CHARS = 120
+STATUS_BODY_MAX_CHARS = 320
+
 
 def _ensure_reports_table(engine):
     """Create the reports table and indexes if they don't already exist.
@@ -52,6 +56,34 @@ def _ensure_reports_table(engine):
         conn.execute(text("ALTER TABLE reports ALTER COLUMN event_id DROP NOT NULL;"))
         conn.execute(text("ALTER TABLE reports ALTER COLUMN resolution TYPE VARCHAR(64);"))
         conn.execute(text("UPDATE reports SET report_type = 'post' WHERE report_type IS NULL;"))
+
+
+def _ensure_timeline_status_message_table(engine):
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_status_message (
+                id SERIAL PRIMARY KEY,
+                timeline_id INTEGER NOT NULL,
+                status_type VARCHAR(16) NULL,
+                status_header VARCHAR(120) NULL,
+                status_body TEXT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_by INTEGER NULL,
+                updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                CONSTRAINT fk_timeline_status_message_timeline FOREIGN KEY (timeline_id) REFERENCES timeline(id) ON DELETE CASCADE,
+                CONSTRAINT fk_timeline_status_message_user FOREIGN KEY (updated_by) REFERENCES "user"(id) ON DELETE SET NULL,
+                CONSTRAINT uq_timeline_status_message_timeline UNIQUE (timeline_id)
+            );
+            """
+        ))
+        conn.execute(text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_timeline_status_message_active
+                ON timeline_status_message (timeline_id, is_active);
+            """
+        ))
 
         # Skip runtime schema mutation via DO $$ to avoid transaction aborts. Migrations should handle columns.
 
@@ -110,6 +142,13 @@ def _normalize_status(raw):
         return 'all'
     s = str(raw).lower()
     return s if s in {'all', 'pending', 'reviewing', 'resolved', 'escalated'} else 'all'
+
+
+def _normalize_status_message_type(raw):
+    if not raw:
+        return None
+    s = str(raw).strip().lower()
+    return s if s in {'good', 'bad'} else None
 
 
 def _normalize_username_policy(username):
@@ -1646,6 +1685,116 @@ def get_timeline_warning_state(timeline_id):
         'mask_content': bool(row.get('mask_content')),
         'warning_until': (row['warning_until'].isoformat() if row.get('warning_until') and hasattr(row['warning_until'], 'isoformat') else (row.get('warning_until') and str(row['warning_until']) or None)),
         'is_indef': bool(row.get('warning_until') and hasattr(row.get('warning_until'), 'year') and row.get('warning_until').year >= 9999),
+    }), 200
+
+
+@reports_bp.route('/timelines/<int:timeline_id>/status-message', methods=['GET'])
+def get_timeline_status_message(timeline_id):
+    engine = get_db_engine()
+    _ensure_timeline_status_message_table(engine)
+
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT status_type,
+                   status_header,
+                   status_body,
+                   is_active,
+                   updated_at
+            FROM timeline_status_message
+            WHERE timeline_id = :tid
+              AND is_active = TRUE
+            LIMIT 1
+            """
+        ), {'tid': int(timeline_id)}).mappings().first()
+
+    if not row:
+        return jsonify({'active': False, 'timeline_id': int(timeline_id)}), 200
+
+    return jsonify({
+        'active': True,
+        'timeline_id': int(timeline_id),
+        'status_type': _normalize_status_message_type(row.get('status_type')),
+        'status_header': row.get('status_header') or '',
+        'status_body': row.get('status_body') or '',
+        'updated_at': row.get('updated_at').isoformat() if row.get('updated_at') and hasattr(row.get('updated_at'), 'isoformat') else None
+    }), 200
+
+
+@reports_bp.route('/timelines/<int:timeline_id>/status-message', methods=['PUT'])
+@jwt_required()
+def update_timeline_status_message(timeline_id):
+    engine = get_db_engine()
+    _ensure_timeline_status_message_table(engine)
+
+    _, _membership, has_access = check_timeline_access(timeline_id, required_role='moderator')
+    if not has_access:
+        return jsonify({'error': 'Access denied'}), 403
+
+    data = request.get_json(silent=True) or {}
+    status_type = _normalize_status_message_type(data.get('status_type'))
+    status_header = (data.get('status_header') or '').strip()
+    status_body = (data.get('status_body') or '').strip()
+
+    if status_header:
+        header_words = [w for w in status_header.split() if w]
+        if len(header_words) > STATUS_HEADER_WORD_LIMIT:
+            return jsonify({'error': f'Status header must be {STATUS_HEADER_WORD_LIMIT} words or less'}), 400
+        if len(status_header) > STATUS_HEADER_MAX_CHARS:
+            return jsonify({'error': f'Status header must be {STATUS_HEADER_MAX_CHARS} characters or less'}), 400
+
+    if status_body and len(status_body) > STATUS_BODY_MAX_CHARS:
+        return jsonify({'error': f'Status body must be {STATUS_BODY_MAX_CHARS} characters or less'}), 400
+
+    is_active = bool(status_type and (status_header or status_body))
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            INSERT INTO timeline_status_message (
+                timeline_id,
+                status_type,
+                status_header,
+                status_body,
+                is_active,
+                updated_by,
+                updated_at,
+                created_at
+            )
+            VALUES (
+                :timeline_id,
+                :status_type,
+                :status_header,
+                :status_body,
+                :is_active,
+                :updated_by,
+                NOW(),
+                NOW()
+            )
+            ON CONFLICT (timeline_id) DO UPDATE
+            SET status_type = EXCLUDED.status_type,
+                status_header = EXCLUDED.status_header,
+                status_body = EXCLUDED.status_body,
+                is_active = EXCLUDED.is_active,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            """
+        ), {
+            'timeline_id': int(timeline_id),
+            'status_type': status_type,
+            'status_header': status_header or None,
+            'status_body': status_body or None,
+            'is_active': is_active,
+            'updated_by': get_user_id(),
+        })
+
+    return jsonify({
+        'success': True,
+        'timeline_id': int(timeline_id),
+        'active': is_active,
+        'status_type': status_type,
+        'status_header': status_header,
+        'status_body': status_body,
     }), 200
 
 
