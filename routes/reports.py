@@ -402,6 +402,19 @@ def _get_report_submission_restriction(conn, user_id):
     return None
 
 
+def _get_open_report_id(conn, where_clause, params):
+    row = conn.execute(text(
+        f"""
+        SELECT id
+        FROM reports
+        WHERE status IN ('pending', 'reviewing', 'escalated')
+          AND {where_clause}
+        LIMIT 1
+        """
+    ), params).mappings().first()
+    return row.get('id') if row else None
+
+
 def _get_site_admin_role(conn, user_id):
     try:
         reg = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
@@ -1039,6 +1052,13 @@ def resolve_site_report(report_id):
             if target_timeline_id is None:
                 return jsonify({'error': 'Timeline ticket missing timeline target'}), 400
             warning_scope = _normalize_warning_scope(data.get('warning_scope'))
+            if warning_scope == 'action_cards':
+                timeline_type_row = conn.execute(text(
+                    "SELECT timeline_type FROM timeline WHERE id = :tid LIMIT 1"
+                ), {'tid': int(target_timeline_id)}).mappings().first()
+                timeline_type = str(timeline_type_row.get('timeline_type') or '').lower() if timeline_type_row else ''
+                if timeline_type != 'community':
+                    warning_scope = 'general'
             mask_content = bool(data.get('mask_content', True))
             warning_until, warning_parse_err = _parse_warning_until(data, allow_custom=True)
             if warning_parse_err:
@@ -1871,6 +1891,18 @@ def submit_report(timeline_id):
                 'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
             }), 429
 
+        existing_report_id = _get_open_report_id(
+            conn,
+            "COALESCE(report_type, 'post') = 'post' AND event_id = :event_id AND timeline_id = :timeline_id",
+            {'event_id': int(event_id), 'timeline_id': int(timeline_id)}
+        )
+        if existing_report_id:
+            return jsonify({
+                'error': 'An open report already exists for this item',
+                'code': 'REPORT_ALREADY_OPEN',
+                'report_id': existing_report_id
+            }), 409
+
         row = conn.execute(text(
             """
             INSERT INTO reports (timeline_id, event_id, reporter_id, reason, status)
@@ -1955,6 +1987,18 @@ def submit_user_report(reported_user_id):
                 'scope': active_lock.get('scope'),
                 'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
             }), 429
+
+        existing_report_id = _get_open_report_id(
+            conn,
+            "report_type = 'user' AND reported_user_id = :reported_user_id",
+            {'reported_user_id': int(reported_user_id)}
+        )
+        if existing_report_id:
+            return jsonify({
+                'error': 'An open report already exists for this user',
+                'code': 'REPORT_ALREADY_OPEN',
+                'report_id': existing_report_id
+            }), 409
 
         row = conn.execute(text(
             """
@@ -2057,6 +2101,18 @@ def submit_timeline_report(reported_timeline_id):
                 'scope': active_lock.get('scope'),
                 'safe_until': (safe_until.isoformat() if hasattr(safe_until, 'isoformat') else str(safe_until))
             }), 429
+
+        existing_report_id = _get_open_report_id(
+            conn,
+            "report_type = 'timeline' AND reported_timeline_id = :reported_timeline_id",
+            {'reported_timeline_id': int(reported_timeline_id)}
+        )
+        if existing_report_id:
+            return jsonify({
+                'error': 'An open report already exists for this timeline',
+                'code': 'REPORT_ALREADY_OPEN',
+                'report_id': existing_report_id
+            }), 409
 
         row = conn.execute(text(
             """

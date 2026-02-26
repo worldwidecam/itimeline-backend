@@ -233,6 +233,7 @@ def create_community_timeline():
             timeline_id=new_timeline.id,
             user_id=get_user_id(),
             role='admin',
+            is_active_member=True,
             joined_at=datetime.now()
         )
         db.session.add(admin)
@@ -326,7 +327,7 @@ def get_timeline_members(timeline_id):
             # Fetch active members (excluding blocked)
             logger.info("get_timeline_members: querying active members")
             rows = conn.execute(text("""
-                SELECT tm.id, tm.timeline_id, tm.user_id, tm.role, tm.is_active_member,
+                SELECT tm.user_id AS member_id, tm.timeline_id, tm.user_id, tm.role, tm.is_active_member,
                        tm.joined_at, tm.invited_by,
                        u.id AS user_id_u, u.username, u.email, u.avatar_url, u.bio
                 FROM timeline_member tm
@@ -339,7 +340,7 @@ def get_timeline_members(timeline_id):
             logger.info(f"get_timeline_members: fetched {len(rows)} db members")
             for row in rows:
                 member_data = {
-                    'id': row['id'],
+                    'id': row['member_id'],
                     'timeline_id': row['timeline_id'],
                     'user_id': row['user_id'],
                     'role': row['role'],
@@ -361,7 +362,7 @@ def get_timeline_members(timeline_id):
             if not site_owner_present:
                 logger.info("get_timeline_members: adding SiteOwner virtual member")
                 so_row = conn.execute(
-                    text("SELECT id, username, email, avatar_url, bio FROM ""user"" WHERE id = 1")
+                    text('SELECT id, username, email, avatar_url, bio FROM "user" WHERE id = 1')
                 ).mappings().first()
                 if so_row:
                     result.append({
@@ -386,7 +387,7 @@ def get_timeline_members(timeline_id):
             if creator_id and creator_id != 1 and not any(m['user_id'] == creator_id for m in result):
                 logger.info(f"get_timeline_members: adding creator virtual member user_id={creator_id}")
                 creator_row = conn.execute(
-                    text("SELECT id, username, email, avatar_url, bio FROM ""user"" WHERE id = :uid"),
+                    text('SELECT id, username, email, avatar_url, bio FROM "user" WHERE id = :uid'),
                     {"uid": creator_id}
                 ).mappings().first()
                 if creator_row:
@@ -411,6 +412,81 @@ def get_timeline_members(timeline_id):
         return jsonify(result), 200
     except Exception as e:
         logger.exception(f"Error getting timeline members: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@community_bp.route('/timelines/<int:timeline_id>/member-count', methods=['GET', 'OPTIONS'])
+@cross_origin(
+    origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'https://i-timeline.com',
+        'https://www.i-timeline.com'
+    ],
+    methods=['GET', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires'],
+    supports_credentials=True,
+)
+@jwt_required()
+def get_timeline_member_count(timeline_id):
+    """Return a dedicated member count aligned with member inclusion rules."""
+    try:
+        logger.info(f"get_timeline_member_count: start for timeline_id={timeline_id}")
+        from flask import current_app
+        sa_ext = current_app.extensions.get('sqlalchemy')
+        engine = None
+        if sa_ext is None:
+            logger.warning("get_timeline_member_count: sqlalchemy extension not found on current_app.extensions")
+        else:
+            if hasattr(sa_ext, 'db') and hasattr(sa_ext.db, 'engine'):
+                engine = sa_ext.db.engine
+            elif hasattr(sa_ext, 'engine'):
+                engine = sa_ext.engine
+            elif hasattr(sa_ext, 'engines'):
+                try:
+                    engine = sa_ext.engines[current_app]
+                except Exception as e:
+                    logger.warning(f"get_timeline_member_count: failed sa_ext.engines lookup: {e}")
+
+        if engine is None:
+            from app import db as app_db
+            engine = app_db.engine
+
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            timeline_row = conn.execute(
+                text("""
+                    SELECT id, created_by, created_at
+                    FROM timeline
+                    WHERE id = :tid
+                """),
+                {"tid": timeline_id}
+            ).mappings().first()
+
+            if not timeline_row:
+                return jsonify({"error": "Timeline not found"}), 404
+
+            rows = conn.execute(text("""
+                SELECT tm.user_id
+                FROM timeline_member tm
+                WHERE tm.timeline_id = :tid
+                  AND tm.is_active_member = TRUE
+                  AND (tm.is_blocked IS NULL OR tm.is_blocked = FALSE)
+            """), {"tid": timeline_id}).mappings().all()
+
+        member_ids = {row['user_id'] for row in rows}
+
+        if 1 not in member_ids:
+            member_ids.add(1)
+
+        creator_id = timeline_row['created_by']
+        if creator_id and creator_id != 1 and creator_id not in member_ids:
+            member_ids.add(creator_id)
+
+        return jsonify({"count": len(member_ids)}), 200
+    except Exception as e:
+        logger.exception(f"Error getting timeline member count: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
  

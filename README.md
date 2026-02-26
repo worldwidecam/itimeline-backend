@@ -123,6 +123,7 @@ git commit -m "Add migration: requires_approval field"
    | **String comparison** | Case-insensitive | Case-sensitive | Use `ILIKE` for case-insensitive |
    | **Date/Time** | Text storage | Native types | Use SQLAlchemy types, not raw strings |
    | **Auto-increment** | `AUTOINCREMENT` | `SERIAL` | Use SQLAlchemy `db.Column(db.Integer, primary_key=True)` |
+   | **Reserved table names** | Not enforced | `user` conflicts with system view | Always quote `"user"` in raw SQL to avoid `column "id" does not exist` errors |
    
    **✅ CORRECT Examples:**
    ```python

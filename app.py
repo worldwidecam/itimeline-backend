@@ -2233,6 +2233,8 @@ def get_timeline_v3(timeline_id):
         # Get member count for community timelines
         member_count = 0
         if timeline.timeline_type == 'community':
+            if timeline.created_by:
+                ensure_creator_membership(timeline.id, timeline.created_by)
             # TimelineMember is already defined in this file
             member_count = TimelineMember.query.filter_by(
                 timeline_id=timeline_id,
