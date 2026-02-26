@@ -611,6 +611,7 @@ def list_site_admins():
                    sa.role,
                    sa.created_at,
                    u.username,
+                   u.email,
                    u.avatar_url
             FROM site_admin sa
             LEFT JOIN "user" u ON u.id = sa.user_id
@@ -625,10 +626,99 @@ def list_site_admins():
             'role': r.get('role'),
             'created_at': (r['created_at'].isoformat() if r.get('created_at') and hasattr(r['created_at'], 'isoformat') else (r.get('created_at') and str(r['created_at']) or None)),
             'username': r.get('username'),
+            'email': r.get('email'),
             'avatar_url': r.get('avatar_url'),
         })
 
     return jsonify({'items': items}), 200
+
+
+@reports_bp.route('/admins/site', methods=['POST'])
+@jwt_required()
+def add_site_admin():
+    """Add a SiteAdmin (SiteOwner only)."""
+    data = request.get_json(silent=True) or {}
+    identifier = str(data.get('identifier') or data.get('user_id') or '').strip()
+    if not identifier:
+        return jsonify({'error': 'User identifier is required'}), 400
+
+    engine = get_db_engine()
+    with engine.begin() as conn:
+        role = _get_site_admin_role(conn, get_jwt_identity())
+        if role != 'SiteOwner' and int(get_jwt_identity()) != 1:
+            return jsonify({'error': 'Access denied'}), 403
+
+        reg = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+        if not (reg and reg[0]):
+            return jsonify({'error': 'site_admin table missing'}), 400
+
+        user_row = None
+        if identifier.isdigit():
+            user_row = conn.execute(
+                text('SELECT id, username, email, avatar_url FROM "user" WHERE id = :uid'),
+                {'uid': int(identifier)}
+            ).mappings().first()
+        else:
+            user_row = conn.execute(
+                text('SELECT id, username, email, avatar_url FROM "user" WHERE LOWER(username) = LOWER(:ident) OR LOWER(email) = LOWER(:ident)'),
+                {'ident': identifier}
+            ).mappings().first()
+
+        if not user_row:
+            return jsonify({'error': 'User not found'}), 404
+
+        existing = conn.execute(
+            text('SELECT role FROM site_admin WHERE user_id = :uid'),
+            {'uid': user_row['id']}
+        ).mappings().first()
+
+        if existing:
+            return jsonify({'error': 'User is already a site admin'}), 400
+
+        conn.execute(
+            text('INSERT INTO site_admin (user_id, role, created_at) VALUES (:uid, :role, NOW())'),
+            {'uid': user_row['id'], 'role': 'SiteAdmin'}
+        )
+
+        return jsonify({
+            'user_id': user_row['id'],
+            'role': 'SiteAdmin',
+            'username': user_row['username'],
+            'email': user_row['email'],
+            'avatar_url': user_row['avatar_url'],
+        }), 201
+
+
+@reports_bp.route('/admins/site/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def remove_site_admin(user_id):
+    """Remove a SiteAdmin (SiteOwner only)."""
+    if int(user_id) == 1:
+        return jsonify({'error': 'Cannot remove SiteOwner'}), 403
+
+    engine = get_db_engine()
+    with engine.begin() as conn:
+        role = _get_site_admin_role(conn, get_jwt_identity())
+        if role != 'SiteOwner' and int(get_jwt_identity()) != 1:
+            return jsonify({'error': 'Access denied'}), 403
+
+        existing = conn.execute(
+            text('SELECT role FROM site_admin WHERE user_id = :uid'),
+            {'uid': user_id}
+        ).mappings().first()
+
+        if not existing:
+            return jsonify({'error': 'Site admin not found'}), 404
+
+        if existing.get('role') == 'SiteOwner':
+            return jsonify({'error': 'Cannot remove SiteOwner'}), 403
+
+        conn.execute(
+            text('DELETE FROM site_admin WHERE user_id = :uid'),
+            {'uid': user_id}
+        )
+
+    return jsonify({'status': 'removed'}), 200
 
 
 @reports_bp.route('/reports', methods=['GET'])

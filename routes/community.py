@@ -149,7 +149,11 @@ def check_timeline_access(timeline_id, required_role=None):
         with engine.begin() as conn:
             # Get timeline information
             timeline_row = conn.execute(
-                text("SELECT id, created_by, name, description, visibility, privacy_changed_at FROM timeline WHERE id = :tid"),
+                text("""
+                    SELECT id, created_by, name, description, visibility, privacy_changed_at, timeline_type
+                    FROM timeline
+                    WHERE id = :tid
+                """),
                 {"tid": timeline_id}
             ).mappings().first()
             if not timeline_row:
@@ -173,6 +177,21 @@ def check_timeline_access(timeline_id, required_role=None):
                 # Creator can perform moderator/admin actions
                 return timeline_row, membership_row, True
             
+            # Allow SiteAdmin to view community timelines without membership (read-only access)
+            if required_role is None:
+                try:
+                    reg = conn.execute(text("SELECT to_regclass('public.site_admin')")).first()
+                    if reg and reg[0]:
+                        site_row = conn.execute(
+                            text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                            {"uid": user_id_int}
+                        ).mappings().first()
+                        site_role = site_row.get('role') if site_row else None
+                        if site_role in {'SiteOwner', 'SiteAdmin'} and timeline_row.get('timeline_type') == 'community':
+                            return timeline_row, None, True
+                except Exception as e:
+                    logger.info(f"check_timeline_access: site_admin lookup skipped ({e})")
+
             # Check if user is an active member of the timeline
             membership_row = conn.execute(
                 text("SELECT * FROM timeline_member WHERE timeline_id = :tid AND user_id = :uid AND is_active_member = TRUE"),
@@ -1426,6 +1445,26 @@ def check_membership_status(timeline_id):
             "is_creator": True
         }), 200
         
+    # Allow SiteAdmin to view community timelines without membership (read-only)
+    if timeline.timeline_type == 'community':
+        try:
+            reg = db.session.execute(text("SELECT to_regclass('public.site_admin')")).first()
+            if reg and reg[0]:
+                site_row = db.session.execute(
+                    text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                    {'uid': user_id}
+                ).mappings().first()
+                site_role = site_row.get('role') if site_row else None
+                if site_role in {'SiteOwner', 'SiteAdmin'}:
+                    return jsonify({
+                        "is_member": True,
+                        "role": site_role,
+                        "timeline_visibility": timeline.visibility,
+                        "is_site_admin": True
+                    }), 200
+        except Exception as e:
+            logger.info(f"membership-status: site_admin lookup skipped ({e})")
+
     # For regular users, check database membership
     try:
         # Get membership

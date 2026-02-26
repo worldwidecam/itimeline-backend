@@ -189,6 +189,7 @@ from routes.media import media_bp
 from routes.community import community_bp  # Re-enabled community blueprint
 from routes.passport import passport_bp
 from routes.reports import reports_bp
+from routes.site_settings import site_settings_bp
 
 # Register blueprints
 app.register_blueprint(upload_bp, url_prefix='/api')
@@ -202,6 +203,7 @@ app.register_blueprint(community_bp, url_prefix='/api/v1')  # Register community
 app.register_blueprint(passport_bp, url_prefix='/api/v1')
 # Reports (Manage Posts) placeholder endpoints
 app.register_blueprint(reports_bp, url_prefix='/api/v1')
+app.register_blueprint(site_settings_bp, url_prefix='/api/v1')
 
 
 # Test endpoint for passport functionality
@@ -4338,6 +4340,20 @@ def check_membership_status_new(timeline_id):
             # Only set is_member=True if active
             if membership.is_active_member:
                 is_member = True
+        elif timeline.timeline_type == 'community':
+            try:
+                reg = db.session.execute(text("SELECT to_regclass('public.site_admin')")).first()
+                if reg and reg[0]:
+                    site_row = db.session.execute(
+                        text('SELECT role FROM site_admin WHERE user_id = :uid'),
+                        {'uid': user_id}
+                    ).mappings().first()
+                    site_role = site_row.get('role') if site_row else None
+                    if site_role in {'SiteOwner', 'SiteAdmin'}:
+                        is_member = True
+                        role = site_role
+            except Exception as e:
+                app.logger.info(f"membership-status (new): site_admin lookup skipped ({e})")
         elif is_site_owner(user_id):
             # Site owner always has access
             is_member = True
