@@ -49,6 +49,8 @@ def _ensure_site_settings_table(conn):
             landing_rotator_json TEXT NOT NULL DEFAULT '[]',
             landing_rotation_interval_ms INTEGER NOT NULL DEFAULT 3000,
             landing_rotator_randomize BOOLEAN NOT NULL DEFAULT FALSE,
+            landing_badge_text TEXT NOT NULL DEFAULT '',
+            landing_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -58,6 +60,18 @@ def _ensure_site_settings_table(conn):
         """
         ALTER TABLE site_settings
         ADD COLUMN IF NOT EXISTS landing_rotator_randomize BOOLEAN NOT NULL DEFAULT FALSE;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS landing_badge_text TEXT NOT NULL DEFAULT '';
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS landing_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE;
         """
     ))
 
@@ -113,7 +127,9 @@ def _load_landing_rotator(conn):
         SELECT landing_lead_sentence,
                landing_rotator_json,
                landing_rotation_interval_ms,
-               landing_rotator_randomize
+               landing_rotator_randomize,
+               landing_badge_text,
+               landing_badge_enabled
         FROM site_settings
         WHERE id = 1
         """
@@ -125,6 +141,8 @@ def _load_landing_rotator(conn):
             'endings': DEFAULT_ROTATOR,
             'rotation_interval_ms': DEFAULT_INTERVAL_MS,
             'randomize': False,
+            'badge_text': 'Not Yet Available, Seeking Funding!',
+            'badge_enabled': True,
         }
 
     raw_rotator = row.get('landing_rotator_json') or '[]'
@@ -138,10 +156,12 @@ def _load_landing_rotator(conn):
         'endings': _normalize_endings(endings),
         'rotation_interval_ms': _safe_interval(row.get('landing_rotation_interval_ms')),
         'randomize': bool(row.get('landing_rotator_randomize')),
+        'badge_text': row.get('landing_badge_text') or '',
+        'badge_enabled': bool(row.get('landing_badge_enabled')),
     }
 
 
-def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize):
+def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, badge_text, badge_enabled):
     _ensure_site_settings_table(conn)
     conn.execute(text(
         """
@@ -151,13 +171,17 @@ def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize):
             landing_rotator_json,
             landing_rotation_interval_ms,
             landing_rotator_randomize,
+            landing_badge_text,
+            landing_badge_enabled,
             updated_at
-        ) VALUES (1, :lead_sentence, :rotator_json, :interval_ms, :randomize, NOW())
+        ) VALUES (1, :lead_sentence, :rotator_json, :interval_ms, :randomize, :badge_text, :badge_enabled, NOW())
         ON CONFLICT (id) DO UPDATE SET
             landing_lead_sentence = EXCLUDED.landing_lead_sentence,
             landing_rotator_json = EXCLUDED.landing_rotator_json,
             landing_rotation_interval_ms = EXCLUDED.landing_rotation_interval_ms,
             landing_rotator_randomize = EXCLUDED.landing_rotator_randomize,
+            landing_badge_text = EXCLUDED.landing_badge_text,
+            landing_badge_enabled = EXCLUDED.landing_badge_enabled,
             updated_at = NOW()
         """
     ), {
@@ -165,6 +189,8 @@ def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize):
         'rotator_json': json.dumps(endings),
         'interval_ms': interval_ms,
         'randomize': bool(randomize),
+        'badge_text': badge_text,
+        'badge_enabled': bool(badge_enabled),
     })
 
 
@@ -187,13 +213,15 @@ def update_landing_rotator_settings():
     endings = _normalize_endings(data.get('endings'))
     interval_ms = _safe_interval(data.get('rotation_interval_ms'))
     randomize = bool(data.get('randomize'))
+    badge_text = str(data.get('badge_text') or '').strip()
+    badge_enabled = bool(data.get('badge_enabled'))
 
     engine = get_db_engine()
     with engine.begin() as conn:
         if not _require_site_owner(conn, get_jwt_identity()):
             return jsonify({'error': 'Access denied'}), 403
 
-        _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize)
+        _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, badge_text, badge_enabled)
         landing_rotator = _load_landing_rotator(conn)
 
     return jsonify({
