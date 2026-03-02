@@ -38,6 +38,7 @@ DEFAULT_ROTATOR = [
     "Your Local Karen"
 ]
 DEFAULT_INTERVAL_MS = 3000
+DEFAULT_LED_START_DELAY_SECONDS = 45
 
 
 def _ensure_site_settings_table(conn):
@@ -51,6 +52,10 @@ def _ensure_site_settings_table(conn):
             landing_rotator_randomize BOOLEAN NOT NULL DEFAULT FALSE,
             landing_badge_text TEXT NOT NULL DEFAULT '',
             landing_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            toolbar_led_message TEXT NOT NULL DEFAULT '',
+            toolbar_led_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            toolbar_led_random_start BOOLEAN NOT NULL DEFAULT TRUE,
+            toolbar_led_start_delay_seconds INTEGER NOT NULL DEFAULT 45,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -72,6 +77,30 @@ def _ensure_site_settings_table(conn):
         """
         ALTER TABLE site_settings
         ADD COLUMN IF NOT EXISTS landing_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS toolbar_led_message TEXT NOT NULL DEFAULT '';
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS toolbar_led_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS toolbar_led_random_start BOOLEAN NOT NULL DEFAULT TRUE;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS toolbar_led_start_delay_seconds INTEGER NOT NULL DEFAULT 45;
         """
     ))
 
@@ -120,6 +149,14 @@ def _safe_interval(value):
     return interval if interval > 0 else DEFAULT_INTERVAL_MS
 
 
+def _safe_led_start_delay_seconds(value):
+    try:
+        delay_seconds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LED_START_DELAY_SECONDS
+    return delay_seconds if delay_seconds >= 5 else DEFAULT_LED_START_DELAY_SECONDS
+
+
 def _load_landing_rotator(conn):
     _ensure_site_settings_table(conn)
     row = conn.execute(text(
@@ -129,7 +166,11 @@ def _load_landing_rotator(conn):
                landing_rotation_interval_ms,
                landing_rotator_randomize,
                landing_badge_text,
-               landing_badge_enabled
+               landing_badge_enabled,
+               toolbar_led_message,
+               toolbar_led_enabled,
+               toolbar_led_random_start,
+               toolbar_led_start_delay_seconds
         FROM site_settings
         WHERE id = 1
         """
@@ -143,6 +184,10 @@ def _load_landing_rotator(conn):
             'randomize': False,
             'badge_text': 'Not Yet Available, Seeking Funding!',
             'badge_enabled': True,
+            'toolbar_led_message': '',
+            'toolbar_led_enabled': False,
+            'toolbar_led_random_start': True,
+            'toolbar_led_start_delay_seconds': DEFAULT_LED_START_DELAY_SECONDS,
         }
 
     raw_rotator = row.get('landing_rotator_json') or '[]'
@@ -158,10 +203,26 @@ def _load_landing_rotator(conn):
         'randomize': bool(row.get('landing_rotator_randomize')),
         'badge_text': row.get('landing_badge_text') or '',
         'badge_enabled': bool(row.get('landing_badge_enabled')),
+        'toolbar_led_message': row.get('toolbar_led_message') or '',
+        'toolbar_led_enabled': bool(row.get('toolbar_led_enabled')),
+        'toolbar_led_random_start': bool(row.get('toolbar_led_random_start')),
+        'toolbar_led_start_delay_seconds': _safe_led_start_delay_seconds(row.get('toolbar_led_start_delay_seconds')),
     }
 
 
-def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, badge_text, badge_enabled):
+def _save_landing_rotator(
+    conn,
+    lead_sentence,
+    endings,
+    interval_ms,
+    randomize,
+    badge_text,
+    badge_enabled,
+    toolbar_led_message,
+    toolbar_led_enabled,
+    toolbar_led_random_start,
+    toolbar_led_start_delay_seconds,
+):
     _ensure_site_settings_table(conn)
     conn.execute(text(
         """
@@ -173,8 +234,25 @@ def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, 
             landing_rotator_randomize,
             landing_badge_text,
             landing_badge_enabled,
+            toolbar_led_message,
+            toolbar_led_enabled,
+            toolbar_led_random_start,
+            toolbar_led_start_delay_seconds,
             updated_at
-        ) VALUES (1, :lead_sentence, :rotator_json, :interval_ms, :randomize, :badge_text, :badge_enabled, NOW())
+        ) VALUES (
+            1,
+            :lead_sentence,
+            :rotator_json,
+            :interval_ms,
+            :randomize,
+            :badge_text,
+            :badge_enabled,
+            :toolbar_led_message,
+            :toolbar_led_enabled,
+            :toolbar_led_random_start,
+            :toolbar_led_start_delay_seconds,
+            NOW()
+        )
         ON CONFLICT (id) DO UPDATE SET
             landing_lead_sentence = EXCLUDED.landing_lead_sentence,
             landing_rotator_json = EXCLUDED.landing_rotator_json,
@@ -182,6 +260,10 @@ def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, 
             landing_rotator_randomize = EXCLUDED.landing_rotator_randomize,
             landing_badge_text = EXCLUDED.landing_badge_text,
             landing_badge_enabled = EXCLUDED.landing_badge_enabled,
+            toolbar_led_message = EXCLUDED.toolbar_led_message,
+            toolbar_led_enabled = EXCLUDED.toolbar_led_enabled,
+            toolbar_led_random_start = EXCLUDED.toolbar_led_random_start,
+            toolbar_led_start_delay_seconds = EXCLUDED.toolbar_led_start_delay_seconds,
             updated_at = NOW()
         """
     ), {
@@ -191,6 +273,10 @@ def _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, 
         'randomize': bool(randomize),
         'badge_text': badge_text,
         'badge_enabled': bool(badge_enabled),
+        'toolbar_led_message': toolbar_led_message,
+        'toolbar_led_enabled': bool(toolbar_led_enabled),
+        'toolbar_led_random_start': bool(toolbar_led_random_start),
+        'toolbar_led_start_delay_seconds': _safe_led_start_delay_seconds(toolbar_led_start_delay_seconds),
     })
 
 
@@ -215,13 +301,29 @@ def update_landing_rotator_settings():
     randomize = bool(data.get('randomize'))
     badge_text = str(data.get('badge_text') or '').strip()
     badge_enabled = bool(data.get('badge_enabled'))
+    toolbar_led_message = str(data.get('toolbar_led_message') or '').strip()
+    toolbar_led_enabled = bool(data.get('toolbar_led_enabled'))
+    toolbar_led_random_start = bool(data.get('toolbar_led_random_start'))
+    toolbar_led_start_delay_seconds = _safe_led_start_delay_seconds(data.get('toolbar_led_start_delay_seconds'))
 
     engine = get_db_engine()
     with engine.begin() as conn:
         if not _require_site_owner(conn, get_jwt_identity()):
             return jsonify({'error': 'Access denied'}), 403
 
-        _save_landing_rotator(conn, lead_sentence, endings, interval_ms, randomize, badge_text, badge_enabled)
+        _save_landing_rotator(
+            conn,
+            lead_sentence,
+            endings,
+            interval_ms,
+            randomize,
+            badge_text,
+            badge_enabled,
+            toolbar_led_message,
+            toolbar_led_enabled,
+            toolbar_led_random_start,
+            toolbar_led_start_delay_seconds,
+        )
         landing_rotator = _load_landing_rotator(conn)
 
     return jsonify({
