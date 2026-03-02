@@ -220,6 +220,16 @@ def test_passport():
         print(f"Error in test passport endpoint: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/v1/site-stats/user-count', methods=['GET'])
+def get_site_user_count():
+    try:
+        total_users = User.query.count()
+        return jsonify({'count': total_users}), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching site user count: {str(e)}")
+        return jsonify({'error': 'Failed to fetch user count'}), 500
+
 # Ensure the database exists
 with app.app_context():
     db.create_all()
