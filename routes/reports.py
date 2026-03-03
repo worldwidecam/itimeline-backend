@@ -1150,7 +1150,7 @@ def resolve_site_report(report_id):
                 if timeline_type != 'community':
                     warning_scope = 'general'
             mask_content = bool(data.get('mask_content', True))
-            warning_until, warning_parse_err = _parse_warning_until(data, allow_custom=True)
+            warning_until, warning_parse_err = _parse_warning_until(data, allow_custom=False)
             if warning_parse_err:
                 return jsonify({'error': warning_parse_err}), 400
             conn.execute(text(
