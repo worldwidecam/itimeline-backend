@@ -100,7 +100,7 @@ from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from cloud_storage import upload_file as cloudinary_upload_file
 import sqlalchemy
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 import sqlite3
 import json
 # from models import UserPassport  # Temporarily disabled to isolate SQLAlchemy registration issue
@@ -798,6 +798,7 @@ class TimelineAction(db.Model):
     due_date = db.Column(db.DateTime, nullable=True)
     threshold_type = db.Column(db.String(20), nullable=False, default='members')  # 'members', 'events', 'custom'
     threshold_value = db.Column(db.Integer, nullable=False, default=0)
+    baseline_member_count = db.Column(db.Integer, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
@@ -823,11 +824,30 @@ class TimelineAction(db.Model):
             'due_date': self.due_date.isoformat() if self.due_date else None,
             'threshold_type': self.threshold_type,
             'threshold_value': self.threshold_value,
+            'baseline_member_count': self.baseline_member_count,
             'is_active': self.is_active,
             'created_by': self.created_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
+
+class TimelineActionVote(db.Model):
+    """Per-tier action votes (one vote per user per timeline+tier)."""
+    __tablename__ = 'timeline_action_vote'
+
+    id = db.Column(db.Integer, primary_key=True)
+    timeline_id = db.Column(db.Integer, db.ForeignKey('timeline.id'), nullable=False)
+    action_type = db.Column(db.String(20), nullable=False)  # 'bronze', 'silver', 'gold'
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('timeline_id', 'action_type', 'user_id', name='uq_timeline_action_vote_unique'),
+    )
+
+    timeline = db.relationship('Timeline', backref=db.backref('action_votes', lazy=True))
+    voter = db.relationship('User', foreign_keys=[user_id])
 
 class EventTimelineAssociation(db.Model):
     __tablename__ = 'event_timeline_association'
@@ -2282,7 +2302,11 @@ def update_timeline_v3(timeline_id):
     try:
         # Get current user from JWT token
         current_user_id = get_jwt_identity()
-        logger.info(f"User {current_user_id} attempting to update timeline {timeline_id}")
+        try:
+            current_user_id_int = int(current_user_id)
+        except (TypeError, ValueError):
+            current_user_id_int = current_user_id
+        logger.info(f"User {current_user_id_int} attempting to update timeline {timeline_id}")
         
         # Convert timeline_id to integer if it's numeric
         if isinstance(timeline_id, str) and timeline_id.isdigit():
@@ -2294,14 +2318,14 @@ def update_timeline_v3(timeline_id):
         # Check if user has permission to update (must be creator or admin)
         if timeline.timeline_type in ('community', 'personal'):
             # For community timelines, check if user is creator OR has admin role
-            is_creator = (timeline.created_by == current_user_id)
-            is_site_owner = (current_user_id == 1)
+            is_creator = (timeline.created_by == current_user_id_int)
+            is_site_owner = (current_user_id_int == 1)
             
             if not is_creator and not is_site_owner:
                 # Check membership role
                 member = TimelineMember.query.filter_by(
                     timeline_id=timeline_id,
-                    user_id=current_user_id
+                    user_id=current_user_id_int
                 ).first()
                 
                 if not member:
@@ -2313,7 +2337,7 @@ def update_timeline_v3(timeline_id):
                     return jsonify({'error': 'You do not have permission to update this timeline. Only admins, moderators, or the creator can modify settings.'}), 403
         else:
             # For hashtag timelines, only creator can update
-            if timeline.created_by != current_user_id:
+            if timeline.created_by != current_user_id_int:
                 return jsonify({'error': 'Only the timeline creator can update this timeline'}), 403
         
         # Get update data
@@ -4402,6 +4426,111 @@ def check_membership_status_new(timeline_id):
 # TIMELINE ACTION CARDS API ENDPOINTS
 # =============================================================================
 
+VALID_ACTION_TYPES = {'bronze', 'silver', 'gold'}
+VALID_ACTION_THRESHOLD_TYPES = {'members', 'votes', 'events', 'custom'}
+
+
+def _normalize_user_id_int(user_id):
+    try:
+        return int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        return user_id
+
+
+def _normalize_action_type(action_type):
+    s = str(action_type or '').strip().lower()
+    return s if s in VALID_ACTION_TYPES else None
+
+
+def ensure_timeline_action_support_schema():
+    """Safe additive schema ensure for Action Cards support fields/tables."""
+    try:
+        inspector = inspect(db.engine)
+        table_names = set(inspector.get_table_names())
+
+        # Add baseline stamp column for member-threshold goals if missing.
+        if 'timeline_action' in table_names:
+            action_cols = {c['name'] for c in inspector.get_columns('timeline_action')}
+            if 'baseline_member_count' not in action_cols:
+                db.session.execute(text('ALTER TABLE timeline_action ADD COLUMN baseline_member_count INTEGER'))
+                db.session.commit()
+
+        # Ensure vote table exists (one vote per user per timeline+tier).
+        if 'timeline_action_vote' not in table_names:
+            TimelineActionVote.__table__.create(bind=db.engine, checkfirst=True)
+    except Exception as e:
+        db.session.rollback()
+        print(f"[ActionCards] ensure_timeline_action_support_schema failed: {e}")
+
+
+def _get_active_member_count(timeline_id):
+    return TimelineMember.query.filter_by(
+        timeline_id=timeline_id,
+        is_active_member=True
+    ).count()
+
+
+def _build_action_progress(action, timeline_id, user_id):
+    threshold_type = (action.threshold_type or 'members').strip().lower()
+    threshold_value = int(action.threshold_value or 0)
+    baseline_member_count = action.baseline_member_count
+    current_member_count = _get_active_member_count(timeline_id)
+
+    current_votes = TimelineActionVote.query.filter_by(
+        timeline_id=timeline_id,
+        action_type=action.action_type
+    ).count()
+
+    user_voted = False
+    if user_id is not None:
+        user_voted = TimelineActionVote.query.filter_by(
+            timeline_id=timeline_id,
+            action_type=action.action_type,
+            user_id=user_id
+        ).first() is not None
+
+    if threshold_type == 'members':
+        if baseline_member_count is None:
+            baseline_member_count = current_member_count
+        additional_members = max(0, threshold_value)
+        current_additional_members = max(0, current_member_count - baseline_member_count)
+        is_unlocked = additional_members == 0 or current_additional_members >= additional_members
+        return {
+            'threshold_type': 'members',
+            'baseline_member_count': baseline_member_count,
+            'goal_additional_members': additional_members,
+            'current_member_count': current_member_count,
+            'current_additional_members': current_additional_members,
+            'goal_member_count': baseline_member_count + additional_members,
+            'current_votes': current_votes,
+            'user_voted': user_voted,
+            'is_unlocked': is_unlocked,
+        }
+
+    if threshold_type == 'votes':
+        goal_votes = max(0, threshold_value)
+        is_unlocked = goal_votes == 0 or current_votes >= goal_votes
+        return {
+            'threshold_type': 'votes',
+            'goal_votes': goal_votes,
+            'current_votes': current_votes,
+            'user_voted': user_voted,
+            'current_member_count': current_member_count,
+            'baseline_member_count': baseline_member_count,
+            'is_unlocked': is_unlocked,
+        }
+
+    # Fallback for events/custom until specialized goal engines are added.
+    return {
+        'threshold_type': threshold_type,
+        'goal_value': max(0, threshold_value),
+        'current_member_count': current_member_count,
+        'baseline_member_count': baseline_member_count,
+        'current_votes': current_votes,
+        'user_voted': user_voted,
+        'is_unlocked': True,
+    }
+
 @app.route('/api/v1/timelines/<int:timeline_id>/actions', methods=['GET'])
 @jwt_required()
 def get_timeline_actions(timeline_id):
@@ -4410,6 +4539,9 @@ def get_timeline_actions(timeline_id):
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
         
         # Verify timeline exists
         timeline = Timeline.query.get(timeline_id)
@@ -4421,8 +4553,12 @@ def get_timeline_actions(timeline_id):
             timeline_id=timeline_id
         ).order_by(TimelineAction.action_type).all()
         
-        # Convert to dictionary format
-        actions_data = [action.to_dict() for action in actions]
+        # Convert to dictionary format + include progress details
+        actions_data = []
+        for action in actions:
+            action_data = action.to_dict()
+            action_data['progress'] = _build_action_progress(action, timeline_id, user_id)
+            actions_data.append(action_data)
         
         return jsonify({
             'actions': actions_data,
@@ -4442,6 +4578,9 @@ def create_timeline_action(timeline_id):
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
         
         # Verify timeline exists
         timeline = Timeline.query.get(timeline_id)
@@ -4475,24 +4614,57 @@ def create_timeline_action(timeline_id):
             return jsonify({"error": "Title is required for active action cards"}), 400
         
         # Validate action_type
-        valid_types = ['bronze', 'silver', 'gold']
-        if data['action_type'] not in valid_types:
-            return jsonify({"error": f"Invalid action_type. Must be one of: {valid_types}"}), 400
+        normalized_action_type = _normalize_action_type(data['action_type'])
+        if not normalized_action_type:
+            return jsonify({"error": f"Invalid action_type. Must be one of: {sorted(VALID_ACTION_TYPES)}"}), 400
+
+        threshold_type = str(data.get('threshold_type', 'members') or 'members').strip().lower()
+        if threshold_type not in VALID_ACTION_THRESHOLD_TYPES:
+            return jsonify({"error": f"Invalid threshold_type. Must be one of: {sorted(VALID_ACTION_THRESHOLD_TYPES)}"}), 400
+
+        try:
+            threshold_value = int(data.get('threshold_value', 0) or 0)
+        except Exception:
+            return jsonify({"error": "threshold_value must be an integer"}), 400
+        if threshold_value < 0:
+            return jsonify({"error": "threshold_value cannot be negative"}), 400
         
         # Check if action already exists for this type
         existing_action = TimelineAction.query.filter_by(
             timeline_id=timeline_id,
-            action_type=data['action_type']
+            action_type=normalized_action_type
         ).first()
+
+        current_member_count = _get_active_member_count(timeline_id)
         
         if existing_action:
             # Update existing action
             existing_action.title = data['title']
             existing_action.description = data.get('description', '')
-            existing_action.threshold_type = data.get('threshold_type', 'members')
-            existing_action.threshold_value = data.get('threshold_value', 0)
+            previous_threshold_type = (existing_action.threshold_type or 'members').strip().lower()
+            existing_action.threshold_type = threshold_type
+            existing_action.threshold_value = threshold_value
             existing_action.is_active = data.get('is_active', True)
             existing_action.updated_at = datetime.now()
+            votes_cleared = 0
+
+            # Stamp/reset baseline for member-threshold mode.
+            reset_baseline = bool(data.get('reset_baseline'))
+            if threshold_type == 'members' and (
+                existing_action.baseline_member_count is None
+                or previous_threshold_type != 'members'
+                or reset_baseline
+            ):
+                existing_action.baseline_member_count = current_member_count
+            elif threshold_type != 'members':
+                existing_action.baseline_member_count = existing_action.baseline_member_count
+
+            # Optional explicit vote reset for this timeline + action tier.
+            if bool(data.get('reset_votes')):
+                votes_cleared = TimelineActionVote.query.filter_by(
+                    timeline_id=timeline_id,
+                    action_type=normalized_action_type
+                ).delete(synchronize_session=False)
             
             # Handle due_date
             if 'due_date' in data and data['due_date']:
@@ -4506,17 +4678,29 @@ def create_timeline_action(timeline_id):
             db.session.commit()
             return jsonify({
                 'message': 'Action updated successfully',
-                'action': existing_action.to_dict()
+                'votes_cleared': votes_cleared,
+                'action': {
+                    **existing_action.to_dict(),
+                    'progress': _build_action_progress(existing_action, timeline_id, user_id)
+                }
             }), 200
         else:
             # Create new action
+            votes_cleared = 0
+            if bool(data.get('reset_votes')):
+                votes_cleared = TimelineActionVote.query.filter_by(
+                    timeline_id=timeline_id,
+                    action_type=normalized_action_type
+                ).delete(synchronize_session=False)
+
             new_action = TimelineAction(
                 timeline_id=timeline_id,
-                action_type=data['action_type'],
+                action_type=normalized_action_type,
                 title=data['title'],
                 description=data.get('description', ''),
-                threshold_type=data.get('threshold_type', 'members'),
-                threshold_value=data.get('threshold_value', 0),
+                threshold_type=threshold_type,
+                threshold_value=threshold_value,
+                baseline_member_count=current_member_count if threshold_type == 'members' else None,
                 is_active=data.get('is_active', True),
                 created_by=user_id
             )
@@ -4533,7 +4717,11 @@ def create_timeline_action(timeline_id):
             
             return jsonify({
                 'message': 'Action created successfully',
-                'action': new_action.to_dict()
+                'votes_cleared': votes_cleared,
+                'action': {
+                    **new_action.to_dict(),
+                    'progress': _build_action_progress(new_action, timeline_id, user_id)
+                }
             }), 201
         
     except Exception as e:
@@ -4549,6 +4737,9 @@ def update_timeline_action(timeline_id, action_id):
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
         
         # Verify timeline exists
         timeline = Timeline.query.get(timeline_id)
@@ -4623,6 +4814,9 @@ def delete_timeline_action(timeline_id, action_id):
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
         
         # Verify timeline exists
         timeline = Timeline.query.get(timeline_id)
@@ -4671,6 +4865,9 @@ def get_timeline_action_by_type(timeline_id, action_type):
         user_id = get_current_user_id()
         if not user_id:
             return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
         
         # Verify timeline exists
         timeline = Timeline.query.get(timeline_id)
@@ -4678,29 +4875,104 @@ def get_timeline_action_by_type(timeline_id, action_type):
             return jsonify({"error": "Timeline not found"}), 404
         
         # Validate action_type
-        valid_types = ['bronze', 'silver', 'gold']
-        if action_type not in valid_types:
-            return jsonify({"error": f"Invalid action_type. Must be one of: {valid_types}"}), 400
+        normalized_action_type = _normalize_action_type(action_type)
+        if not normalized_action_type:
+            return jsonify({"error": f"Invalid action_type. Must be one of: {sorted(VALID_ACTION_TYPES)}"}), 400
         
         # Find the action
         action = TimelineAction.query.filter_by(
             timeline_id=timeline_id,
-            action_type=action_type,
+            action_type=normalized_action_type,
             is_active=True
         ).first()
         
         if not action:
             return jsonify({
                 'action': None,
-                'message': f'No {action_type} action found for this timeline'
+                'message': f'No {normalized_action_type} action found for this timeline'
             }), 200
         
         return jsonify({
-            'action': action.to_dict()
+            'action': {
+                **action.to_dict(),
+                'progress': _build_action_progress(action, timeline_id, user_id)
+            }
         }), 200
         
     except Exception as e:
         print(f"Error getting timeline action by type: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/v1/timelines/<int:timeline_id>/actions/<string:action_type>/vote', methods=['POST'])
+@jwt_required()
+def vote_timeline_action(timeline_id, action_type):
+    """Cast one vote per user per action tier (bronze/silver/gold)."""
+    try:
+        user_id = get_current_user_id()
+        if not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+        user_id = _normalize_user_id_int(user_id)
+
+        ensure_timeline_action_support_schema()
+
+        normalized_action_type = _normalize_action_type(action_type)
+        if not normalized_action_type:
+            return jsonify({"error": f"Invalid action_type. Must be one of: {sorted(VALID_ACTION_TYPES)}"}), 400
+
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({"error": "Timeline not found"}), 404
+
+        membership = TimelineMember.query.filter_by(
+            timeline_id=timeline_id,
+            user_id=user_id,
+            is_active_member=True
+        ).first()
+        if not membership and not is_site_owner(user_id):
+            return jsonify({"error": "Only active members can vote on action cards"}), 403
+
+        action = TimelineAction.query.filter_by(
+            timeline_id=timeline_id,
+            action_type=normalized_action_type,
+            is_active=True
+        ).first()
+        if not action:
+            return jsonify({"error": f"No active {normalized_action_type} action found for this timeline"}), 404
+
+        existing_vote = TimelineActionVote.query.filter_by(
+            timeline_id=timeline_id,
+            action_type=normalized_action_type,
+            user_id=user_id
+        ).first()
+        if existing_vote:
+            return jsonify({
+                'success': True,
+                'message': 'Vote already recorded',
+                'already_voted': True,
+                'timeline_id': timeline_id,
+                'action_type': normalized_action_type,
+                'progress': _build_action_progress(action, timeline_id, user_id)
+            }), 200
+
+        db.session.add(TimelineActionVote(
+            timeline_id=timeline_id,
+            action_type=normalized_action_type,
+            user_id=user_id
+        ))
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': 'Vote recorded',
+            'already_voted': False,
+            'timeline_id': timeline_id,
+            'action_type': normalized_action_type,
+            'progress': _build_action_progress(action, timeline_id, user_id)
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error voting timeline action: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 # =============================================================================
