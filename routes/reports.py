@@ -148,7 +148,7 @@ def _normalize_status_message_type(raw):
     if not raw:
         return None
     s = str(raw).strip().lower()
-    return s if s in {'good', 'bad'} else None
+    return s if s in {'good', 'bad', 'bronze_action', 'silver_action', 'gold_action'} else None
 
 
 def _normalize_username_policy(username):
