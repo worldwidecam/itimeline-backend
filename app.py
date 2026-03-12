@@ -510,6 +510,7 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
+
 class Timeline(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -665,6 +666,48 @@ def _ensure_user_moderation_tables():
             """
         ))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_username_blocklist_active ON username_blocklist (is_active);"))
+
+
+def _ensure_user_follow_table():
+    """Validate user_follow table presence (schema owned by iTimeline-DB migrations)."""
+    with db.engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'user_follow'
+            )
+            """
+        )).scalar()
+
+    if not row:
+        raise RuntimeError(
+            "Missing required table 'user_follow'. "
+            "Run iTimeline-DB migration: python migrations/add_follow_tables.py"
+        )
+
+
+def _ensure_timeline_follow_table():
+    """Validate timeline_follow table presence (schema owned by iTimeline-DB migrations)."""
+    with db.engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'timeline_follow'
+            )
+            """
+        )).scalar()
+
+    if not row:
+        raise RuntimeError(
+            "Missing required table 'timeline_follow'. "
+            "Run iTimeline-DB migration: python migrations/add_follow_tables.py"
+        )
 
 
 def _is_username_blocklisted(normalized_username):
@@ -3661,6 +3704,342 @@ def lookup_user_by_username():
     except Exception as e:
         logger.error(f"Error looking up user by username: {str(e)}")
         return jsonify({'error': 'Failed to look up user'}), 500
+
+
+@app.route('/api/users/following', methods=['GET'])
+@app.route('/api/v1/users/following', methods=['GET'])
+@jwt_required()
+def list_followed_users():
+    try:
+        _ensure_user_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        rows = db.session.execute(text(
+            """
+            SELECT
+                uf.followed_id,
+                uf.created_at,
+                u.id,
+                u.username,
+                u.avatar_url,
+                u.bio
+            FROM user_follow uf
+            JOIN "user" u ON u.id = uf.followed_id
+            WHERE uf.follower_id = :current_user_id
+            ORDER BY uf.created_at DESC
+            """
+        ), {'current_user_id': current_user_id}).mappings().all()
+
+        if not rows:
+            return jsonify({'users': []}), 200
+
+        ordered = [{
+            'id': row['id'],
+            'username': row['username'],
+            'avatar_url': row['avatar_url'],
+            'bio': row['bio'],
+            'followed_at': row['created_at'].isoformat() if row.get('created_at') else None,
+        } for row in rows]
+
+        return jsonify({'users': ordered}), 200
+    except Exception as e:
+        logger.error(f"Error listing followed users: {str(e)}")
+        return jsonify({'error': 'Failed to fetch followed users'}), 500
+
+
+@app.route('/api/users/<int:user_id>/follow', methods=['POST'])
+@app.route('/api/v1/users/<int:user_id>/follow', methods=['POST'])
+@jwt_required()
+def follow_user(user_id):
+    try:
+        _ensure_user_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        if current_user_id == user_id:
+            return jsonify({'error': 'You cannot follow yourself'}), 400
+
+        target = User.query.get(user_id)
+        if not target:
+            return jsonify({'error': 'User not found'}), 404
+
+        existing = db.session.execute(text(
+            """
+            SELECT id
+            FROM user_follow
+            WHERE follower_id = :current_user_id
+              AND followed_id = :followed_id
+            LIMIT 1
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'followed_id': user_id,
+        }).first()
+        if existing:
+            return jsonify({'success': True, 'already_following': True}), 200
+
+        db.session.execute(text(
+            """
+            INSERT INTO user_follow (follower_id, followed_id)
+            VALUES (:current_user_id, :followed_id)
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'followed_id': user_id,
+        })
+        db.session.commit()
+        return jsonify({'success': True, 'already_following': False}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error following user {user_id}: {str(e)}")
+        return jsonify({'error': 'Failed to follow user'}), 500
+
+
+@app.route('/api/users/<int:user_id>/follow', methods=['DELETE'])
+@app.route('/api/v1/users/<int:user_id>/follow', methods=['DELETE'])
+@jwt_required()
+def unfollow_user(user_id):
+    try:
+        _ensure_user_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        deleted = db.session.execute(text(
+            """
+            DELETE FROM user_follow
+            WHERE follower_id = :current_user_id
+              AND followed_id = :followed_id
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'followed_id': user_id,
+        })
+        if deleted.rowcount == 0:
+            return jsonify({'success': True, 'already_unfollowed': True}), 200
+
+        db.session.commit()
+        return jsonify({'success': True, 'already_unfollowed': False}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unfollowing user {user_id}: {str(e)}")
+        return jsonify({'error': 'Failed to unfollow user'}), 500
+
+
+@app.route('/api/timelines/following/hashtags', methods=['GET'])
+@app.route('/api/v1/timelines/following/hashtags', methods=['GET'])
+@jwt_required()
+def list_followed_hashtag_timelines():
+    try:
+        _ensure_timeline_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        banned_timeline_ids, _ = _get_active_banned_timeline_ids_and_names()
+
+        rows = db.session.execute(text(
+            """
+            SELECT
+                tf.timeline_id,
+                tf.follow_kind,
+                tf.created_at AS followed_at,
+                t.id,
+                t.name,
+                t.description,
+                t.timeline_type,
+                t.visibility,
+                t.created_by,
+                t.created_at
+            FROM timeline_follow tf
+            JOIN timeline t ON t.id = tf.timeline_id
+            WHERE tf.user_id = :current_user_id
+              AND t.timeline_type = 'hashtag'
+            ORDER BY tf.created_at DESC
+            """
+        ), {'current_user_id': current_user_id}).mappings().all()
+
+        if banned_timeline_ids:
+            rows = [row for row in rows if int(row['timeline_id']) not in banned_timeline_ids]
+
+        timelines = [{
+            'id': row['id'],
+            'name': row['name'],
+            'description': row['description'],
+            'timeline_type': row['timeline_type'],
+            'visibility': row['visibility'],
+            'created_by': row['created_by'],
+            'created_at': row['created_at'].isoformat() if row.get('created_at') else None,
+            'follow_kind': row['follow_kind'] or 'watch',
+            'followed_at': row['followed_at'].isoformat() if row.get('followed_at') else None,
+        } for row in rows]
+
+        return jsonify({'timelines': timelines}), 200
+    except Exception as e:
+        logger.error(f"Error listing followed hashtag timelines: {str(e)}")
+        return jsonify({'error': 'Failed to fetch followed hashtag timelines'}), 500
+
+
+@app.route('/api/timelines/<int:timeline_id>/follow', methods=['POST'])
+@app.route('/api/v1/timelines/<int:timeline_id>/follow', methods=['POST'])
+@jwt_required()
+def follow_timeline(timeline_id):
+    try:
+        _ensure_timeline_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        if _is_timeline_banned(timeline_id):
+            return _banned_timeline_response(403)
+
+        timeline = Timeline.query.get(timeline_id)
+        if not timeline:
+            return jsonify({'error': 'Timeline not found'}), 404
+        if timeline.timeline_type != 'hashtag':
+            return jsonify({'error': 'Only hashtag timelines can be followed via this endpoint'}), 400
+
+        payload = request.get_json(silent=True) or {}
+        requested_kind = str(payload.get('follow_kind') or 'watch').strip().lower()
+        if requested_kind not in ('watch', 'follow'):
+            requested_kind = 'watch'
+
+        existing = db.session.execute(text(
+            """
+            SELECT id, follow_kind
+            FROM timeline_follow
+            WHERE user_id = :current_user_id
+              AND timeline_id = :timeline_id
+            LIMIT 1
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'timeline_id': timeline_id,
+        }).mappings().first()
+
+        if existing:
+            if (existing.get('follow_kind') or 'watch') != requested_kind:
+                db.session.execute(text(
+                    """
+                    UPDATE timeline_follow
+                    SET follow_kind = :follow_kind
+                    WHERE id = :id
+                    """
+                ), {
+                    'follow_kind': requested_kind,
+                    'id': existing['id'],
+                })
+                db.session.commit()
+            return jsonify({'success': True, 'already_following': True, 'follow_kind': requested_kind}), 200
+
+        db.session.execute(text(
+            """
+            INSERT INTO timeline_follow (user_id, timeline_id, follow_kind)
+            VALUES (:current_user_id, :timeline_id, :follow_kind)
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'timeline_id': timeline_id,
+            'follow_kind': requested_kind,
+        })
+        db.session.commit()
+        return jsonify({'success': True, 'already_following': False, 'follow_kind': requested_kind}), 201
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error following timeline {timeline_id}: {str(e)}")
+        return jsonify({'error': 'Failed to follow timeline'}), 500
+
+
+@app.route('/api/timelines/<int:timeline_id>/follow', methods=['DELETE'])
+@app.route('/api/v1/timelines/<int:timeline_id>/follow', methods=['DELETE'])
+@jwt_required()
+def unfollow_timeline(timeline_id):
+    try:
+        _ensure_timeline_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        deleted = db.session.execute(text(
+            """
+            DELETE FROM timeline_follow
+            WHERE user_id = :current_user_id
+              AND timeline_id = :timeline_id
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'timeline_id': timeline_id,
+        })
+
+        if deleted.rowcount == 0:
+            return jsonify({'success': True, 'already_unfollowed': True}), 200
+
+        db.session.commit()
+        return jsonify({'success': True, 'already_unfollowed': False}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unfollowing timeline {timeline_id}: {str(e)}")
+        return jsonify({'error': 'Failed to unfollow timeline'}), 500
+
+
+@app.route('/api/timelines/<int:timeline_id>/follow-status', methods=['GET'])
+@app.route('/api/v1/timelines/<int:timeline_id>/follow-status', methods=['GET'])
+@jwt_required()
+def get_timeline_follow_status(timeline_id):
+    try:
+        _ensure_timeline_follow_table()
+
+        current_user_id = get_jwt_identity()
+        try:
+            current_user_id = int(current_user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid current user identity'}), 400
+
+        row = db.session.execute(text(
+            """
+            SELECT follow_kind, created_at
+            FROM timeline_follow
+            WHERE user_id = :current_user_id
+              AND timeline_id = :timeline_id
+            LIMIT 1
+            """
+        ), {
+            'current_user_id': current_user_id,
+            'timeline_id': timeline_id,
+        }).mappings().first()
+
+        if not row:
+            return jsonify({'is_following': False, 'follow_kind': None, 'followed_at': None}), 200
+
+        return jsonify({
+            'is_following': True,
+            'follow_kind': row.get('follow_kind') or 'watch',
+            'followed_at': row['created_at'].isoformat() if row.get('created_at') else None,
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching timeline follow status for {timeline_id}: {str(e)}")
+        return jsonify({'error': 'Failed to fetch timeline follow status'}), 500
 
 @app.route('/api/users/<int:user_id>/events', methods=['GET'])
 @jwt_required()
