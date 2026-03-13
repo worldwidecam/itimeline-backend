@@ -39,6 +39,15 @@ DEFAULT_ROTATOR = [
 ]
 DEFAULT_INTERVAL_MS = 3000
 DEFAULT_LED_START_DELAY_SECONDS = 45
+DEFAULT_HOME_HERO_INTERVAL_MS = 75000
+HOME_HERO_ALLOWED_SLIDES = {'welcome', 'timeline_spotlight', 'event_spotlight', 'advertisement'}
+
+
+def _default_home_hero_slides():
+    return [
+        {'type': 'welcome', 'enabled': True},
+        {'type': 'timeline_spotlight', 'enabled': True},
+    ]
 
 
 def _ensure_site_settings_table(conn):
@@ -56,6 +65,8 @@ def _ensure_site_settings_table(conn):
             toolbar_led_enabled BOOLEAN NOT NULL DEFAULT FALSE,
             toolbar_led_random_start BOOLEAN NOT NULL DEFAULT TRUE,
             toolbar_led_start_delay_seconds INTEGER NOT NULL DEFAULT 45,
+            home_hero_interval_ms INTEGER NOT NULL DEFAULT 75000,
+            home_hero_slides_json TEXT NOT NULL DEFAULT '[]',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -101,6 +112,18 @@ def _ensure_site_settings_table(conn):
         """
         ALTER TABLE site_settings
         ADD COLUMN IF NOT EXISTS toolbar_led_start_delay_seconds INTEGER NOT NULL DEFAULT 45;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS home_hero_interval_ms INTEGER NOT NULL DEFAULT 75000;
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE site_settings
+        ADD COLUMN IF NOT EXISTS home_hero_slides_json TEXT NOT NULL DEFAULT '[]';
         """
     ))
 
@@ -157,6 +180,56 @@ def _safe_led_start_delay_seconds(value):
     return delay_seconds if delay_seconds >= 5 else DEFAULT_LED_START_DELAY_SECONDS
 
 
+def _safe_home_hero_interval(value):
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_HOME_HERO_INTERVAL_MS
+    return interval if interval > 0 else DEFAULT_HOME_HERO_INTERVAL_MS
+
+
+def _normalize_home_hero_slides(raw):
+    if not isinstance(raw, list):
+        return _default_home_hero_slides()
+
+    normalized = []
+    seen_types = set()
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        slide_type = str(item.get('type') or '').strip().lower()
+        if slide_type not in HOME_HERO_ALLOWED_SLIDES:
+            continue
+        if slide_type in seen_types:
+            continue
+
+        slide = {
+            'type': slide_type,
+            'enabled': bool(item.get('enabled', True)),
+        }
+
+        if slide_type == 'event_spotlight':
+            try:
+                event_id = int(item.get('event_id'))
+                slide['event_id'] = event_id if event_id > 0 else None
+            except (TypeError, ValueError):
+                slide['event_id'] = None
+
+        if slide_type == 'advertisement':
+            slide['headline'] = str(item.get('headline') or '').strip()
+            slide['subtext'] = str(item.get('subtext') or '').strip()
+            slide['cta_label'] = str(item.get('cta_label') or '').strip()
+            slide['cta_href'] = str(item.get('cta_href') or '').strip()
+            slide['open_in_new_tab'] = bool(item.get('open_in_new_tab'))
+
+        normalized.append(slide)
+        seen_types.add(slide_type)
+
+    return normalized or _default_home_hero_slides()
+
+
 def _load_landing_rotator(conn):
     _ensure_site_settings_table(conn)
     row = conn.execute(text(
@@ -170,7 +243,9 @@ def _load_landing_rotator(conn):
                toolbar_led_message,
                toolbar_led_enabled,
                toolbar_led_random_start,
-               toolbar_led_start_delay_seconds
+               toolbar_led_start_delay_seconds,
+               home_hero_interval_ms,
+               home_hero_slides_json
         FROM site_settings
         WHERE id = 1
         """
@@ -188,6 +263,10 @@ def _load_landing_rotator(conn):
             'toolbar_led_enabled': False,
             'toolbar_led_random_start': True,
             'toolbar_led_start_delay_seconds': DEFAULT_LED_START_DELAY_SECONDS,
+            'home_hero': {
+                'rotation_interval_ms': DEFAULT_HOME_HERO_INTERVAL_MS,
+                'slides': _default_home_hero_slides(),
+            },
         }
 
     raw_rotator = row.get('landing_rotator_json') or '[]'
@@ -195,6 +274,12 @@ def _load_landing_rotator(conn):
         endings = json.loads(raw_rotator)
     except Exception:
         endings = []
+
+    raw_home_hero_slides = row.get('home_hero_slides_json') or '[]'
+    try:
+        home_hero_slides = json.loads(raw_home_hero_slides)
+    except Exception:
+        home_hero_slides = []
 
     return {
         'lead_sentence': row.get('landing_lead_sentence') or '',
@@ -207,6 +292,10 @@ def _load_landing_rotator(conn):
         'toolbar_led_enabled': bool(row.get('toolbar_led_enabled')),
         'toolbar_led_random_start': bool(row.get('toolbar_led_random_start')),
         'toolbar_led_start_delay_seconds': _safe_led_start_delay_seconds(row.get('toolbar_led_start_delay_seconds')),
+        'home_hero': {
+            'rotation_interval_ms': _safe_home_hero_interval(row.get('home_hero_interval_ms')),
+            'slides': _normalize_home_hero_slides(home_hero_slides),
+        },
     }
 
 
@@ -222,6 +311,8 @@ def _save_landing_rotator(
     toolbar_led_enabled,
     toolbar_led_random_start,
     toolbar_led_start_delay_seconds,
+    home_hero_interval_ms,
+    home_hero_slides,
 ):
     _ensure_site_settings_table(conn)
     conn.execute(text(
@@ -238,6 +329,8 @@ def _save_landing_rotator(
             toolbar_led_enabled,
             toolbar_led_random_start,
             toolbar_led_start_delay_seconds,
+            home_hero_interval_ms,
+            home_hero_slides_json,
             updated_at
         ) VALUES (
             1,
@@ -251,6 +344,8 @@ def _save_landing_rotator(
             :toolbar_led_enabled,
             :toolbar_led_random_start,
             :toolbar_led_start_delay_seconds,
+            :home_hero_interval_ms,
+            :home_hero_slides_json,
             NOW()
         )
         ON CONFLICT (id) DO UPDATE SET
@@ -264,6 +359,8 @@ def _save_landing_rotator(
             toolbar_led_enabled = EXCLUDED.toolbar_led_enabled,
             toolbar_led_random_start = EXCLUDED.toolbar_led_random_start,
             toolbar_led_start_delay_seconds = EXCLUDED.toolbar_led_start_delay_seconds,
+            home_hero_interval_ms = EXCLUDED.home_hero_interval_ms,
+            home_hero_slides_json = EXCLUDED.home_hero_slides_json,
             updated_at = NOW()
         """
     ), {
@@ -277,6 +374,8 @@ def _save_landing_rotator(
         'toolbar_led_enabled': bool(toolbar_led_enabled),
         'toolbar_led_random_start': bool(toolbar_led_random_start),
         'toolbar_led_start_delay_seconds': _safe_led_start_delay_seconds(toolbar_led_start_delay_seconds),
+        'home_hero_interval_ms': _safe_home_hero_interval(home_hero_interval_ms),
+        'home_hero_slides_json': json.dumps(_normalize_home_hero_slides(home_hero_slides)),
     })
 
 
@@ -305,6 +404,9 @@ def update_landing_rotator_settings():
     toolbar_led_enabled = bool(data.get('toolbar_led_enabled'))
     toolbar_led_random_start = bool(data.get('toolbar_led_random_start'))
     toolbar_led_start_delay_seconds = _safe_led_start_delay_seconds(data.get('toolbar_led_start_delay_seconds'))
+    home_hero = data.get('home_hero') or {}
+    home_hero_interval_ms = _safe_home_hero_interval(home_hero.get('rotation_interval_ms'))
+    home_hero_slides = _normalize_home_hero_slides(home_hero.get('slides'))
 
     engine = get_db_engine()
     with engine.begin() as conn:
@@ -323,6 +425,8 @@ def update_landing_rotator_settings():
             toolbar_led_enabled,
             toolbar_led_random_start,
             toolbar_led_start_delay_seconds,
+            home_hero_interval_ms,
+            home_hero_slides,
         )
         landing_rotator = _load_landing_rotator(conn)
 
