@@ -267,6 +267,24 @@ def _ensure_report_policy_tables(engine):
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_timeline_name_blocklist_active ON timeline_name_blocklist (is_active);"))
 
 
+def _ensure_broken_event_queue_table(engine):
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS broken_event_queue (
+                id SERIAL PRIMARY KEY,
+                event_id INTEGER NOT NULL UNIQUE,
+                note TEXT NULL,
+                added_by INTEGER NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_broken_event_queue_event_id ON broken_event_queue (event_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_broken_event_queue_updated_at ON broken_event_queue (updated_at DESC);"))
+
+
 def _parse_safeguard_until(data, allow_custom):
     safe_until = None
     if allow_custom:
@@ -719,6 +737,267 @@ def remove_site_admin(user_id):
         )
 
     return jsonify({'status': 'removed'}), 200
+
+
+@reports_bp.route('/reports/broken-events', methods=['GET'])
+@jwt_required()
+def list_broken_events_queue():
+    engine = get_db_engine()
+    _ensure_broken_event_queue_table(engine)
+
+    with engine.begin() as conn:
+        has_access, role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        rows = conn.execute(text(
+            """
+            SELECT q.id,
+                   q.event_id,
+                   q.note,
+                   q.added_by,
+                   q.created_at,
+                   q.updated_at,
+                   adder.username AS added_by_username,
+                   (e.id IS NOT NULL) AS event_exists,
+                   e.timeline_id,
+                   e.title AS event_title,
+                   e.type AS event_type,
+                   e.created_by AS event_created_by,
+                   e.created_at AS event_created_at,
+                   creator.username AS event_creator_username,
+                   t.name AS timeline_name,
+                   t.timeline_type,
+                   t.visibility AS timeline_visibility
+            FROM broken_event_queue q
+            LEFT JOIN event e ON e.id = q.event_id
+            LEFT JOIN timeline t ON t.id = e.timeline_id
+            LEFT JOIN "user" creator ON creator.id = e.created_by
+            LEFT JOIN "user" adder ON adder.id = q.added_by
+            ORDER BY q.updated_at DESC, q.id DESC
+            """
+        )).mappings().all()
+
+    items = []
+    for row in rows:
+        items.append({
+            'id': int(row.get('id')),
+            'event_id': int(row.get('event_id')),
+            'note': row.get('note') or '',
+            'added_by': row.get('added_by'),
+            'added_by_username': row.get('added_by_username') or '',
+            'created_at': row.get('created_at').isoformat() if hasattr(row.get('created_at'), 'isoformat') else None,
+            'updated_at': row.get('updated_at').isoformat() if hasattr(row.get('updated_at'), 'isoformat') else None,
+            'event_exists': bool(row.get('event_exists')),
+            'timeline_id': row.get('timeline_id'),
+            'timeline_name': row.get('timeline_name') or '',
+            'timeline_type': row.get('timeline_type') or '',
+            'timeline_visibility': row.get('timeline_visibility') or '',
+            'event_title': row.get('event_title') or '',
+            'event_type': row.get('event_type') or '',
+            'event_created_by': row.get('event_created_by'),
+            'event_creator_username': row.get('event_creator_username') or '',
+            'event_created_at': row.get('event_created_at').isoformat() if hasattr(row.get('event_created_at'), 'isoformat') else None,
+        })
+
+    return jsonify({'items': items}), 200
+
+
+@reports_bp.route('/reports/broken-events', methods=['POST'])
+@jwt_required()
+def add_broken_event_queue_item():
+    data = request.get_json(silent=True) or {}
+    try:
+        event_id = int(data.get('event_id'))
+    except Exception:
+        return jsonify({'error': 'event_id must be an integer'}), 400
+
+    if event_id <= 0:
+        return jsonify({'error': 'event_id must be positive'}), 400
+
+    note = str(data.get('note') or '').strip()
+    actor_id = int(get_jwt_identity())
+    is_home_auto_report = 'source=home_auto' in note.lower()
+
+    engine = get_db_engine()
+    _ensure_broken_event_queue_table(engine)
+
+    with engine.begin() as conn:
+        event_exists = bool(conn.execute(text(
+            "SELECT 1 FROM event WHERE id = :event_id LIMIT 1"
+        ), {'event_id': event_id}).first())
+
+        # Ignore stale Home auto-reports for events that are already gone
+        # (for example, intentionally deleted during triage).
+        if is_home_auto_report and not event_exists:
+            return jsonify({
+                'message': 'Ignored stale home auto-report for missing event',
+                'ignored': True,
+                'event_id': event_id,
+            }), 200
+
+        row = conn.execute(text(
+            """
+            INSERT INTO broken_event_queue (event_id, note, added_by, created_at, updated_at)
+            VALUES (:event_id, :note, :added_by, NOW(), NOW())
+            ON CONFLICT (event_id)
+            DO UPDATE SET note = EXCLUDED.note,
+                          added_by = EXCLUDED.added_by,
+                          updated_at = NOW()
+            RETURNING id, event_id
+            """
+        ), {
+            'event_id': event_id,
+            'note': note or None,
+            'added_by': actor_id,
+        }).mappings().first()
+
+    return jsonify({
+        'message': 'Broken event queued',
+        'item': {
+            'id': int(row['id']),
+            'event_id': int(row['event_id']),
+        },
+    }), 200
+
+
+@reports_bp.route('/reports/broken-events/<int:queue_id>', methods=['DELETE'])
+@jwt_required()
+def remove_broken_event_queue_item(queue_id):
+    engine = get_db_engine()
+    _ensure_broken_event_queue_table(engine)
+
+    with engine.begin() as conn:
+        has_access, role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        deleted = conn.execute(text(
+            """
+            DELETE FROM broken_event_queue
+            WHERE id = :queue_id
+            RETURNING id, event_id
+            """
+        ), {'queue_id': int(queue_id)}).mappings().first()
+
+        if not deleted:
+            return jsonify({'error': 'Queue item not found'}), 404
+
+    return jsonify({
+        'message': 'Broken event queue item removed',
+        'id': int(deleted['id']),
+        'event_id': int(deleted['event_id']),
+    }), 200
+
+
+@reports_bp.route('/reports/broken-events/<int:event_id>/delete', methods=['POST'])
+@jwt_required()
+def delete_broken_event_by_id(event_id):
+    data = request.get_json(silent=True) or {}
+    remove_from_queue = bool(data.get('remove_from_queue', True))
+
+    engine = get_db_engine()
+    _ensure_broken_event_queue_table(engine)
+
+    with engine.begin() as conn:
+        has_access, role = _require_site_admin(conn, get_jwt_identity())
+        if not has_access:
+            return jsonify({'error': 'Access denied'}), 403
+
+        event_row = conn.execute(text(
+            """
+            SELECT id, timeline_id, media_url, cloudinary_id
+            FROM event
+            WHERE id = :event_id
+            """
+        ), {'event_id': int(event_id)}).mappings().first()
+
+        if not event_row:
+            queue_deleted_count = 0
+            if remove_from_queue:
+                queue_deleted_count = int(conn.execute(text(
+                    "DELETE FROM broken_event_queue WHERE event_id = :event_id"
+                ), {'event_id': int(event_id)}).rowcount or 0)
+
+            return jsonify({
+                'error': 'Event not found',
+                'event_id': int(event_id),
+                'queue_deleted_count': queue_deleted_count,
+            }), 404
+
+        media_deleted = False
+        media_url = str(event_row.get('media_url') or '').strip()
+        cloudinary_id = str(event_row.get('cloudinary_id') or '').strip()
+        public_id = cloudinary_id
+
+        if not public_id and media_url and ('cloudinary.com' in media_url or 'res.cloudinary' in media_url):
+            try:
+                parts = media_url.split('/')
+                if 'upload' in parts:
+                    upload_index = parts.index('upload')
+                    if upload_index + 2 < len(parts):
+                        if parts[upload_index + 1].startswith('v'):
+                            public_id = '/'.join(parts[upload_index + 2:])
+                        else:
+                            public_id = '/'.join(parts[upload_index + 1:])
+            except Exception:
+                public_id = ''
+
+        if public_id:
+            try:
+                from cloud_storage import delete_file
+                delete_result = delete_file(public_id)
+                media_deleted = bool(delete_result.get('success'))
+            except Exception:
+                media_deleted = False
+
+        conn.execute(text("DELETE FROM vote WHERE event_id = :event_id"), {'event_id': int(event_id)})
+        conn.execute(text("DELETE FROM event_timeline_association WHERE event_id = :event_id"), {'event_id': int(event_id)})
+        conn.execute(text("DELETE FROM event_timeline_refs WHERE event_id = :event_id"), {'event_id': int(event_id)})
+        conn.execute(text("DELETE FROM event_tags WHERE event_id = :event_id"), {'event_id': int(event_id)})
+        conn.execute(text("DELETE FROM timeline_block_list WHERE event_id = :event_id"), {'event_id': int(event_id)})
+        conn.execute(text("DELETE FROM reports WHERE event_id = :event_id"), {'event_id': int(event_id)})
+
+        deleted_count = int(conn.execute(text(
+            "DELETE FROM event WHERE id = :event_id"
+        ), {'event_id': int(event_id)}).rowcount or 0)
+
+        queue_deleted_count = 0
+        queue_updated_count = 0
+        if remove_from_queue:
+            queue_deleted_count = int(conn.execute(text(
+                "DELETE FROM broken_event_queue WHERE event_id = :event_id"
+            ), {'event_id': int(event_id)}).rowcount or 0)
+        else:
+            deleted_marker = f"resolution=deleted_by_admin | deleted_at={datetime.now(timezone.utc).isoformat()}"
+            queue_updated_count = int(conn.execute(text(
+                """
+                UPDATE broken_event_queue
+                SET note = CASE
+                    WHEN note IS NULL OR BTRIM(note) = '' THEN :marker
+                    WHEN POSITION('resolution=deleted_by_admin' IN LOWER(note)) > 0 THEN note
+                    ELSE note || ' | ' || :marker
+                END,
+                updated_at = NOW()
+                WHERE event_id = :event_id
+                """
+            ), {
+                'event_id': int(event_id),
+                'marker': deleted_marker,
+            }).rowcount or 0)
+
+    if deleted_count <= 0:
+        return jsonify({'error': 'Event delete failed'}), 500
+
+    return jsonify({
+        'message': 'Event deleted from broken-event queue flow',
+        'event_id': int(event_id),
+        'timeline_id': int(event_row.get('timeline_id') or 0),
+        'deleted_count': deleted_count,
+        'queue_deleted_count': queue_deleted_count,
+        'queue_updated_count': queue_updated_count,
+        'media_deleted': media_deleted,
+    }), 200
 
 
 @reports_bp.route('/reports', methods=['GET'])
