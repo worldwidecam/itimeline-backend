@@ -220,6 +220,9 @@ def _ensure_report_policy_tables(engine):
         ))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_report_safeguard_target_scope ON report_safeguard_cooldown (target_type, target_id, scope);"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_report_safeguard_safe_until ON report_safeguard_cooldown (safe_until);"))
+        conn.execute(text("ALTER TABLE report_safeguard_cooldown ADD COLUMN IF NOT EXISTS source_report_id INTEGER;"))
+        conn.execute(text("ALTER TABLE report_safeguard_cooldown ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;"))
+        conn.execute(text("ALTER TABLE report_safeguard_cooldown ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();"))
 
         conn.execute(text(
             """
@@ -236,6 +239,12 @@ def _ensure_report_policy_tables(engine):
             )
             """
         ))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS source_report_id INTEGER;"))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS warning_scope VARCHAR(32) NOT NULL DEFAULT 'other';"))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS mask_content BOOLEAN NOT NULL DEFAULT TRUE;"))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS warning_until TIMESTAMPTZ;"))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;"))
+        conn.execute(text("ALTER TABLE timeline_warning_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();"))
 
         conn.execute(text(
             """
@@ -250,6 +259,9 @@ def _ensure_report_policy_tables(engine):
             )
             """
         ))
+        conn.execute(text("ALTER TABLE timeline_ban_state ADD COLUMN IF NOT EXISTS source_report_id INTEGER;"))
+        conn.execute(text("ALTER TABLE timeline_ban_state ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;"))
+        conn.execute(text("ALTER TABLE timeline_ban_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();"))
 
         conn.execute(text(
             """
@@ -491,10 +503,10 @@ def list_reports(timeline_id):
     _ensure_report_policy_tables(engine)
     _ensure_user_moderation_tables(engine)
 
-    where_clause = "WHERE timeline_id = :timeline_id AND status <> 'escalated' AND COALESCE(report_type, 'post') = 'post'"
+    where_clause = "WHERE r.timeline_id = :timeline_id AND r.status <> 'escalated' AND COALESCE(r.report_type, 'post') = 'post'"
     params = { 'timeline_id': timeline_id }
     if status != 'all':
-        where_clause += " AND status = :status"
+        where_clause += " AND r.status = :status"
         params['status'] = status
 
     # Counts per status

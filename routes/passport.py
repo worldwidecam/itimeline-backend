@@ -325,6 +325,15 @@ def update_user_preferences():
 
         engine = get_db_engine()
         with engine.begin() as conn:
+            reg = conn.execute(text("SELECT to_regclass('public.user_passport')")).first()
+            table_exists = bool(reg and reg[0])
+            if not table_exists:
+                return jsonify({'message': 'user_passport table not found; preferences were not persisted', 'preferences': {}}), 200
+
+            # Legacy schema compatibility: older user_passport definitions may not include preferences_json.
+            # Add the column lazily so preference writes do not fail with 500.
+            conn.execute(text("ALTER TABLE user_passport ADD COLUMN IF NOT EXISTS preferences_json TEXT NOT NULL DEFAULT '{}'"))
+
             # Ensure passport row exists
             conn.execute(
                 text('''
