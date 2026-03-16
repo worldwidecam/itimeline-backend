@@ -53,15 +53,34 @@ def upload_file():
     
     if file and allowed_file(file.filename):
         try:
-            # Determine the appropriate folder based on content type
+            upload_kind = str(request.form.get('upload_kind') or '').strip().lower()
+            timeline_id_raw = str(request.form.get('timeline_id') or '').strip()
+
+            # Determine the appropriate folder based on requested upload kind
             folder = "timeline_media"  # Default folder for timeline media
+            upload_options = {}
+
+            if upload_kind == 'timeline_cover':
+                if not timeline_id_raw.isdigit():
+                    return jsonify({'error': 'timeline_id is required for timeline cover uploads'}), 400
+                timeline_id = int(timeline_id_raw)
+
+                # Covers are image-only uploads
+                if not (file.content_type or '').startswith('image/'):
+                    return jsonify({'error': 'Timeline cover upload requires an image file'}), 400
+
+                folder = "timeline_cover"
+                upload_options.update({
+                    'resource_type': 'image',
+                    'public_id': f"{timeline_id}_{uuid.uuid4().hex[:12]}"
+                })
             
             # Import the Cloudinary upload function
             from cloud_storage import upload_file as cloudinary_upload_file
             
             # Upload to Cloudinary
             print(f"Uploading to Cloudinary in folder: {folder}")
-            upload_result = cloudinary_upload_file(file, folder=folder)
+            upload_result = cloudinary_upload_file(file, folder=folder, **upload_options)
             
             print("Cloudinary upload result:")
             print(f"  Success: {upload_result.get('success', False)}")
@@ -88,8 +107,11 @@ def upload_file():
                 'public_id': upload_result.get('public_id'),
                 'resource_type': upload_result.get('resource_type', 'image'),
                 'type': file.content_type,
-                'storage': 'cloudinary'
+                'storage': 'cloudinary',
+                'upload_kind': upload_kind or 'general'
             }
+            if upload_kind == 'timeline_cover' and timeline_id_raw.isdigit():
+                response_data['timeline_id'] = int(timeline_id_raw)
             
             print(f"Response data: {response_data}")
             print("===== CLOUDINARY UPLOAD COMPLETED SUCCESSFULLY =====\n")

@@ -72,6 +72,33 @@ def _is_timeline_banned(timeline_id):
         return False
 
 
+def _extract_cloudinary_public_id_from_url(url):
+    """Best-effort conversion of a Cloudinary delivery URL into a public_id."""
+    raw = str(url or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+        path = parsed.path or ''
+        if '/upload/' not in path:
+            return None
+        tail = path.split('/upload/', 1)[1]
+        segments = [segment for segment in tail.split('/') if segment]
+        if not segments:
+            return None
+        if segments[0].startswith('v') and segments[0][1:].isdigit():
+            segments = segments[1:]
+        if not segments:
+            return None
+        last = segments[-1]
+        if '.' in last:
+            segments[-1] = last.rsplit('.', 1)[0]
+        public_id = '/'.join(segments).strip('/')
+        return public_id or None
+    except Exception:
+        return None
+
+
 def _banned_timeline_response(status_code=403):
     return jsonify({
         'error': 'This timeline has been banned',
@@ -521,6 +548,13 @@ class Timeline(db.Model):
     visibility = db.Column(db.String(20), default='public', nullable=False)  # public or private
     privacy_changed_at = db.Column(db.DateTime, nullable=True)  # For tracking cooldown period
     requires_approval = db.Column(db.Boolean, default=False, nullable=False)  # Require admin approval for join requests
+    cover_image_url = db.Column(db.Text, nullable=True)  # Community cover image source URL
+    cover_upload_enabled = db.Column(db.Boolean, default=True, nullable=False)  # Image privilege toggle (hard blur when false)
+    cover_portrait_x = db.Column(db.Float, default=50.0, nullable=False)
+    cover_portrait_y = db.Column(db.Float, default=50.0, nullable=False)
+    cover_landscape_x = db.Column(db.Float, default=50.0, nullable=False)
+    cover_landscape_y = db.Column(db.Float, default=50.0, nullable=False)
+    cover_zoom = db.Column(db.Float, default=1.0, nullable=False)
     quote_text = db.Column(db.Text, nullable=True)  # Custom quote text for timeline
     quote_author = db.Column(db.String(200), nullable=True)  # Custom quote author for timeline
     members = db.relationship('TimelineMember', backref='timeline', lazy=True)
@@ -552,6 +586,13 @@ class Timeline(db.Model):
             'timeline_type': self.timeline_type,
             'visibility': self.visibility,
             'requires_approval': self.requires_approval,
+            'cover_image_url': self.cover_image_url,
+            'cover_upload_enabled': self.cover_upload_enabled,
+            'cover_portrait_x': float(getattr(self, 'cover_portrait_x', 50.0) or 50.0),
+            'cover_portrait_y': float(getattr(self, 'cover_portrait_y', 50.0) or 50.0),
+            'cover_landscape_x': float(getattr(self, 'cover_landscape_x', 50.0) or 50.0),
+            'cover_landscape_y': float(getattr(self, 'cover_landscape_y', 50.0) or 50.0),
+            'cover_zoom': float(getattr(self, 'cover_zoom', 1.0) or 1.0),
             'quote_text': self.quote_text,
             'quote_author': self.quote_author
         }
@@ -710,6 +751,54 @@ def _ensure_timeline_follow_table():
         )
 
 
+def ensure_timeline_cover_settings_schema():
+    """Safe additive schema ensure for timeline cover settings columns."""
+    try:
+        inspector = inspect(db.engine)
+        table_names = set(inspector.get_table_names())
+        if 'timeline' not in table_names:
+            return
+
+        timeline_cols = {c['name'] for c in inspector.get_columns('timeline')}
+        changed = False
+
+        if 'cover_image_url' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_image_url TEXT'))
+            changed = True
+
+        if 'cover_upload_enabled' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_upload_enabled BOOLEAN NOT NULL DEFAULT TRUE'))
+            changed = True
+
+        if 'cover_portrait_x' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_portrait_x DOUBLE PRECISION NOT NULL DEFAULT 50'))
+            changed = True
+
+        if 'cover_portrait_y' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_portrait_y DOUBLE PRECISION NOT NULL DEFAULT 50'))
+            changed = True
+
+        if 'cover_landscape_x' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_landscape_x DOUBLE PRECISION NOT NULL DEFAULT 50'))
+            changed = True
+
+        if 'cover_landscape_y' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_landscape_y DOUBLE PRECISION NOT NULL DEFAULT 50'))
+            changed = True
+
+        if 'cover_zoom' not in timeline_cols:
+            db.session.execute(text('ALTER TABLE timeline ADD COLUMN cover_zoom DOUBLE PRECISION NOT NULL DEFAULT 1'))
+            changed = True
+
+        if changed:
+            db.session.commit()
+    except Exception as exc:
+        try:
+            app.logger.info(f"ensure_timeline_cover_settings_schema skipped or failed: {exc}")
+        except Exception:
+            pass
+
+
 def _is_username_blocklisted(normalized_username):
     if not normalized_username:
         return False
@@ -828,6 +917,33 @@ def check_personal_timeline_access(timeline_id, required_role=None):
 
     app.logger.info(f"[personal_acl] user {user_id_int} has no access to timeline {timeline_id} -> forbidden")
     return timeline, 'forbidden'
+
+
+def _get_site_admin_role(user_id):
+    """Return SiteOwner/SiteAdmin role string when available, else None."""
+    try:
+        uid = int(user_id)
+    except Exception:
+        uid = user_id
+
+    try:
+        if int(uid) == 1:
+            return 'SiteOwner'
+    except Exception:
+        pass
+
+    try:
+        reg = db.session.execute(text("SELECT to_regclass('public.site_admin')")).first()
+        if not (reg and reg[0]):
+            return None
+        row = db.session.execute(
+            text('SELECT role FROM site_admin WHERE user_id = :uid'),
+            {'uid': uid}
+        ).mappings().first()
+        return row['role'] if row and row.get('role') else None
+    except Exception as exc:
+        app.logger.info(f"site_admin lookup skipped ({exc})")
+        return None
 
 class TimelineAction(db.Model):
     """Model for storing timeline-specific action cards (Bronze/Silver/Gold)"""
@@ -2273,6 +2389,8 @@ def get_timeline_v3(timeline_id):
     elif isinstance(timeline_id, str):
         return jsonify({'error': 'Timeline not found'}), 404
     try:
+        ensure_timeline_cover_settings_schema()
+
         if _is_timeline_banned(timeline_id):
             return _banned_timeline_response(403)
 
@@ -2326,7 +2444,14 @@ def get_timeline_v3(timeline_id):
             'visibility': timeline.visibility or 'public',
             'privacy_changed_at': privacy_changed_at_str,
             'member_count': member_count,
-            'requires_approval': getattr(timeline, 'requires_approval', False)
+            'requires_approval': getattr(timeline, 'requires_approval', False),
+            'cover_image_url': (timeline.cover_image_url or '').strip() if getattr(timeline, 'cover_image_url', None) else '',
+            'cover_upload_enabled': bool(getattr(timeline, 'cover_upload_enabled', True)),
+            'cover_portrait_x': float(getattr(timeline, 'cover_portrait_x', 50.0) or 50.0),
+            'cover_portrait_y': float(getattr(timeline, 'cover_portrait_y', 50.0) or 50.0),
+            'cover_landscape_x': float(getattr(timeline, 'cover_landscape_x', 50.0) or 50.0),
+            'cover_landscape_y': float(getattr(timeline, 'cover_landscape_y', 50.0) or 50.0),
+            'cover_zoom': float(getattr(timeline, 'cover_zoom', 1.0) or 1.0)
         })
     except Exception as e:
         app.logger.error(f'Error fetching timeline: {str(e)}')
@@ -2343,6 +2468,8 @@ def update_timeline_v3(timeline_id):
     (Only one #News globally, but #News and i-News can coexist)
     """
     try:
+        ensure_timeline_cover_settings_schema()
+
         # Get current user from JWT token
         current_user_id = get_jwt_identity()
         try:
@@ -2387,6 +2514,22 @@ def update_timeline_v3(timeline_id):
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data provided'}), 400
+
+        old_cover_public_id_to_delete = None
+
+        def _clamp_frame_position(value, default=50.0):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                numeric = float(default)
+            return max(-40.0, min(140.0, numeric))
+
+        def _clamp_zoom(value, default=1.0):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                numeric = float(default)
+            return max(1.0, min(2.5, numeric))
         
         # Update description if provided
         if 'description' in data:
@@ -2397,6 +2540,34 @@ def update_timeline_v3(timeline_id):
         if 'requires_approval' in data:
             timeline.requires_approval = bool(data.get('requires_approval', False))
             logger.info(f"Updated requires_approval for timeline {timeline_id} to {timeline.requires_approval}")
+
+        # Update cover image URL if provided (admins/moderators/creator/site owner already pass base route permissions)
+        if 'cover_image_url' in data:
+            previous_cover_url = str(timeline.cover_image_url or '').strip()
+            incoming_cover_url = str(data.get('cover_image_url') or '').strip()
+            timeline.cover_image_url = incoming_cover_url if incoming_cover_url else None
+            if previous_cover_url and previous_cover_url != incoming_cover_url:
+                old_cover_public_id_to_delete = _extract_cloudinary_public_id_from_url(previous_cover_url)
+            logger.info(f"Updated cover_image_url for timeline {timeline_id}")
+
+        if 'cover_portrait_x' in data:
+            timeline.cover_portrait_x = _clamp_frame_position(data.get('cover_portrait_x'), 50.0)
+        if 'cover_portrait_y' in data:
+            timeline.cover_portrait_y = _clamp_frame_position(data.get('cover_portrait_y'), 50.0)
+        if 'cover_landscape_x' in data:
+            timeline.cover_landscape_x = _clamp_frame_position(data.get('cover_landscape_x'), 50.0)
+        if 'cover_landscape_y' in data:
+            timeline.cover_landscape_y = _clamp_frame_position(data.get('cover_landscape_y'), 50.0)
+        if 'cover_zoom' in data:
+            timeline.cover_zoom = _clamp_zoom(data.get('cover_zoom'), 1.0)
+
+        # Update image privilege toggle (SiteOwner/SiteAdmin only)
+        if 'cover_upload_enabled' in data:
+            site_role = _get_site_admin_role(current_user_id_int)
+            if site_role not in {'SiteOwner', 'SiteAdmin'}:
+                return jsonify({'error': 'Only SiteOwner/SiteAdmin can update Image Privilege'}), 403
+            timeline.cover_upload_enabled = bool(data.get('cover_upload_enabled', True))
+            logger.info(f"Updated cover_upload_enabled for timeline {timeline_id} to {timeline.cover_upload_enabled} by {site_role}")
         
         # TODO: Add name updating here after implementing per-type uniqueness constraint
         # if 'name' in data:
@@ -2411,6 +2582,14 @@ def update_timeline_v3(timeline_id):
         #     timeline.name = new_name
         
         db.session.commit()
+
+        if old_cover_public_id_to_delete:
+            try:
+                from cloud_storage import delete_file
+                delete_file(old_cover_public_id_to_delete)
+                logger.info(f"Removed previous cover image asset {old_cover_public_id_to_delete}")
+            except Exception as cleanup_exc:
+                logger.warning(f"Failed to delete previous cover image asset {old_cover_public_id_to_delete}: {cleanup_exc}")
         
         # Return updated timeline data
         created_at_str = timeline.created_at.isoformat() if timeline.created_at else datetime.now().isoformat()
@@ -2423,7 +2602,14 @@ def update_timeline_v3(timeline_id):
             'created_at': created_at_str,
             'timeline_type': timeline.timeline_type or 'hashtag',
             'visibility': timeline.visibility or 'public',
-            'requires_approval': getattr(timeline, 'requires_approval', False)
+            'requires_approval': getattr(timeline, 'requires_approval', False),
+            'cover_image_url': (timeline.cover_image_url or '').strip() if getattr(timeline, 'cover_image_url', None) else '',
+            'cover_upload_enabled': bool(getattr(timeline, 'cover_upload_enabled', True)),
+            'cover_portrait_x': float(getattr(timeline, 'cover_portrait_x', 50.0) or 50.0),
+            'cover_portrait_y': float(getattr(timeline, 'cover_portrait_y', 50.0) or 50.0),
+            'cover_landscape_x': float(getattr(timeline, 'cover_landscape_x', 50.0) or 50.0),
+            'cover_landscape_y': float(getattr(timeline, 'cover_landscape_y', 50.0) or 50.0),
+            'cover_zoom': float(getattr(timeline, 'cover_zoom', 1.0) or 1.0)
         }), 200
         
     except Exception as e:
